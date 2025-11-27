@@ -7,3 +7,10 @@ dependencies = [
     "aiohttp>=3.8",
     "websockets>=11.0",
 ]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio",
+    "pytest-mock",
+]
