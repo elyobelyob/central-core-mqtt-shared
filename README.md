@@ -47,3 +47,24 @@ payload = schemas.ConfigUpdateCommand(
     config={"feature_flag": True},
 )
 ```
+
+## Home Assistant discovery
+
+The shared package now exposes `central_core_mqtt_shared.ha` helpers that talk to Home Assistant's REST and websocket APIs, keep the schema authoritative, and work without hard‑coded metadata.
+
+```py
+from central_core_mqtt_shared.ha import discover_all_from_environment
+
+# requires HA_REST_URL and HA_TOKEN to be set in the environment before calling
+metadata = await discover_all_from_environment()
+print("REST base:", metadata.rest.base_url)
+print("Websocket URL:", metadata.websocket.websocket_url)
+```
+
+Set `HA_REST_URL` to your Home Assistant base URL (e.g., `https://example.local:8123`) and keep `HA_TOKEN` as a long‑lived access token stored outside version control; the helper will read both at runtime. You can also run the discovery CLI directly:
+
+```
+HA_REST_URL=https://example.local:8123 HA_TOKEN=secret python -m central_core_mqtt_shared.ha.discovery
+```
+
+This prints the cached services/states/config payloads so Vault, Hub, or the addon can reuse them without manual syncs. Always keep the token private—don’t commit it anywhere in the repo.
