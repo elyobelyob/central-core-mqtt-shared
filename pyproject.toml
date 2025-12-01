@@ -1,6 +1,6 @@
 [project]
 name = "central-core-mqtt-shared"
-version = "0.1.0"
+version = "1.0.0"
 description = "Shared MQTT protocol definitions for central-core hubs, vault, and addon."
 requires-python = ">=3.10"
 dependencies = [
