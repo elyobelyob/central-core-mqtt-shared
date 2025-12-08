@@ -6,4 +6,9 @@ central_core_mqtt_shared/topics.py
 central_core_mqtt_shared.egg-info/PKG-INFO
 central_core_mqtt_shared.egg-info/SOURCES.txt
 central_core_mqtt_shared.egg-info/dependency_links.txt
+central_core_mqtt_shared.egg-info/requires.txt
 central_core_mqtt_shared.egg-info/top_level.txt
+central_core_mqtt_shared/ha/__init__.py
+central_core_mqtt_shared/ha/discovery.py
+tests/test_discovery_async.py
+tests/test_discovery_unit.py
