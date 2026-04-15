@@ -64,10 +64,17 @@ class SensorsTelemetry(BaseModel):
     Wrapper for both basic and full sensor data.
     partial = True  -> basic lists or delta updates
     partial = False -> full metadata dump
+
+    NOTE: `sensors` is typed as `List[FullSensor]` rather than
+    `List[Union[BasicSensor, FullSensor]]`. A left-to-right Union picks
+    `BasicSensor` first for any payload with `id/state/type`, silently
+    discarding `attributes` (and therefore `device_class`) from payloads
+    that include them. FullSensor is a superset with optional `unit`
+    and `attributes`, so Basic-shaped payloads still validate against it.
     """
     partial: bool
     timestamp: float
-    sensors: List[Union[BasicSensor, FullSensor]]
+    sensors: List[FullSensor]
 
 
 # ============================================================
