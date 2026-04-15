@@ -6,6 +6,7 @@ requires-python = ">=3.10"
 dependencies = [
     "aiohttp>=3.8",
     "websockets>=11.0",
+    "pydantic>=2.0",
 ]
 
 [project.optional-dependencies]
@@ -13,4 +14,33 @@ dev = [
     "pytest>=7.0",
     "pytest-asyncio",
     "pytest-mock",
+    "pytest-cov",
+]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+    "--cov=central_core_mqtt_shared",
+    "--cov-report=term-missing",
+    "--cov-report=xml",
+    "--cov-fail-under=80",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["central_core_mqtt_shared"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
 ]
