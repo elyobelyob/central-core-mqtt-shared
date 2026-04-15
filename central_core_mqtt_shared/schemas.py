@@ -51,10 +51,13 @@ class FullSensor(BaseModel):
     """
     Full sensor metadata returned by HA on poll or change event.
     Contains extended information from HA's entity registry + attributes.
+
+    All fields except `id` have defaults so Basic-shaped payloads
+    (`{id, state}` or `{id, state, type}`) validate against FullSensor too.
     """
     id: str
-    state: Optional[Any]
-    type: Optional[str]
+    state: Optional[Any] = None
+    type: Optional[str] = None
     unit: Optional[str] = None
     attributes: Dict[str, Any] = Field(default_factory=dict)
 
@@ -65,16 +68,15 @@ class SensorsTelemetry(BaseModel):
     partial = True  -> basic lists or delta updates
     partial = False -> full metadata dump
 
-    NOTE: `sensors` is typed as `List[FullSensor]` rather than
-    `List[Union[BasicSensor, FullSensor]]`. A left-to-right Union picks
-    `BasicSensor` first for any payload with `id/state/type`, silently
-    discarding `attributes` (and therefore `device_class`) from payloads
-    that include them. FullSensor is a superset with optional `unit`
-    and `attributes`, so Basic-shaped payloads still validate against it.
+    `sensors` is `Union[FullSensor, BasicSensor]` with FullSensor FIRST —
+    Pydantic's left-to-right Union resolution picks FullSensor, so
+    `attributes` / `device_class` are preserved on incoming dicts. The
+    BasicSensor arm stays for backwards compatibility with callers that
+    construct BasicSensor instances directly (test suites, legacy code).
     """
     partial: bool
     timestamp: float
-    sensors: List[FullSensor]
+    sensors: List[Union[FullSensor, BasicSensor]]
 
 
 # ============================================================
