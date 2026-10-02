@@ -30,6 +30,30 @@ Shared MQTT topic templates and payload schemas for the central-core ecosystem (
   - Addon command: `hubs/{hub_id}/v{version}/addon/ha/cmd/{command}` (`schemas.HAAddonCommand`)
 - Broadcast (Vault → all hubs)
   - Global commands: `hubs/broadcast/v{version}/cmd/{command}`
+- Store and confirm (protocol 1.1, since v1.1.0)
+  - Catch-up batch (Hub → Vault): `hubs/{hub_id}/v{version}/telemetry/batch` (`schemas.TelemetryBatch`)
+  - Store ack (Vault → Hub): `hubs/{hub_id}/v{version}/ack` (`schemas.StoreAck`, `{"upto": N, "stored": K}`)
+
+## Store and confirm (v1.1.0)
+
+A hub keeps every reading in an on-disk outbox until the vault says it has
+stored it. Telemetry payloads gain optional fields (`schemas.OutboxFields`):
+
+| field | meaning |
+|---|---|
+| `seq` | per-hub sequence number, increasing within one `outbox_id` |
+| `event_ts` | when the reading happened (Home Assistant `last_changed`), UTC ISO 8601 |
+| `outbox_id` | names the hub's outbox; `(hub, outbox_id, seq)` is the dedupe key |
+| `oldest_seq` | oldest `seq` the hub still holds unacknowledged |
+| `hub_time` | the hub's clock when it sent the message (clock check) |
+
+After committing readings, the vault publishes `StoreAck` with `upto`, the end
+of the unbroken run of stored `seq`s from `oldest_seq`. The hub deletes those
+and resends the rest (on reconnect, oldest first, in `TelemetryBatch`es whose
+records keep their own `seq` and `event_ts`). The vault stores history at
+`event_ts`, so a reading resent hours late lands at the time it happened.
+
+All of it is optional: payloads without `seq` validate and are handled as before.
 
 ## Helper usage
 ```py

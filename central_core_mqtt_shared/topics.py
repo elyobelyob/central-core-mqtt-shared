@@ -40,6 +40,13 @@ TELEMETRY_EVENTS = "hubs/{hub_id}/v{version}/telemetry/events"
 TELEMETRY_GENERAL = "hubs/{hub_id}/v{version}/telemetry/general"
 """Catch-all telemetry category for user-defined or extension data."""
 
+TELEMETRY_BATCH = "hubs/{hub_id}/v{version}/telemetry/batch"
+"""
+Catch-up batch (protocol 1.1): readings a hub resends from its outbox, oldest
+first, as one `schemas.TelemetryBatch`. Each record keeps its own `seq` and
+`event_ts`, so a reading resent hours late is stored at the time it happened.
+"""
+
 
 # ============================================================
 # Presence / Lifecycle (Hub → Vault)
@@ -114,6 +121,21 @@ Example:
 
 
 # ============================================================
+# Store acknowledgement (Vault → Hub), protocol 1.1
+# ============================================================
+
+STORE_ACK = "hubs/{hub_id}/v{version}/ack"
+"""
+The vault has stored (committed) every reading of this hub's outbox up to and
+including `upto` (`schemas.StoreAck`). The hub deletes those readings; it keeps
+everything else and resends it. Published by the vault at QoS 1.
+
+This topic has no further levels, so it never matches the command-ack template
+`ACK_GENERIC` (`.../ack/{command_name}/{command_id}`) and vice versa.
+"""
+
+
+# ============================================================
 # Home Assistant Addon Namespace
 # ============================================================
 
@@ -160,6 +182,7 @@ __all__ = [
     "TELEMETRY_SENSORS",
     "TELEMETRY_EVENTS",
     "TELEMETRY_GENERAL",
+    "TELEMETRY_BATCH",
 
     # Status
     "STATUS_ONLINE",
@@ -176,6 +199,7 @@ __all__ = [
 
     # Ack
     "ACK_GENERIC",
+    "STORE_ACK",
 
     # Addon
     "ADDON_HA_TELEMETRY",
