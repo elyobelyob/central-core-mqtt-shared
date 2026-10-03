@@ -352,12 +352,15 @@ async def test_recv_timeout_uses_configured_timeout(monkeypatch):
 def _counting_discovery(monkeypatch):
     calls = {"rest": 0, "ws": 0}
 
+    # Each fake yields to the event loop so concurrent callers genuinely overlap.
     async def fake_rest(self):
         calls["rest"] += 1
+        await asyncio.sleep(0)
         return RESTDiscoveryResult(base_url=self.rest_base_url, services=[], states=[{"n": calls["rest"]}])
 
     async def fake_ws(self):
         calls["ws"] += 1
+        await asyncio.sleep(0)
         return WebsocketDiscoveryResult(websocket_url=self.websocket_url, config={"n": calls["ws"]})
 
     monkeypatch.setattr(HAConnection, "discover_rest", fake_rest)
