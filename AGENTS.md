@@ -13,7 +13,7 @@ Dementia care should be care. These principles come before any feature, design o
 
 ## Central Core in one paragraph
 
-Home monitoring for people living with dementia: a few door and motion sensors, no cameras or microphones, and a plain-English morning update for the family. Pre-launch: today it watches the owner's parents' home (`rookery-001`) and the owner's flat (`elyob-main-001`), but **build it as a future multi-customer health-data product**. Scope every query to a home, rate-limit anything that sends messages, and never cut a security corner because "it's only one family".
+Home monitoring for people living with dementia: a few door and motion sensors, no cameras or microphones, and a plain-English morning update for the family. It is pre-launch, but **build it as a multi-customer health-data product**. Scope every query to a home, rate-limit anything that sends messages, and never cut a security corner because "it's only one family".
 
 The five repos sit side by side in a `cc-all` folder: `central-core-vault` (owns all data and design), `central-core-client` (family portal, talks only to the vault API), `central-core-hub-addon-releases` (Home Assistant add-on in each home, talks to the vault over MQTT), `central-core-mqtt-shared` (the MQTT protocol), `central-core.com` (public website). `cc-all/AGENTS.md` has the whole-system view.
 
