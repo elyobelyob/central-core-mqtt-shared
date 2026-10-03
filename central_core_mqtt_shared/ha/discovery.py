@@ -47,10 +47,6 @@ async def _run_cli() -> None:
     print(json.dumps({"rest": result.rest.__dict__, "websocket": result.websocket.__dict__}, indent=2))
 
 
-if __name__ == "__main__":
-    asyncio.run(_run_cli())
-
-
 class HADiscoveryError(Exception):
     """Raised when Home Assistant discovery fails."""
 
@@ -221,3 +217,7 @@ class HAConnection:
         if not self._token:
             raise HADiscoveryError("WebSocket discovery requires a long-lived access token")
         return self._token
+
+
+if __name__ == "__main__":
+    asyncio.run(_run_cli())
