@@ -28,7 +28,7 @@ addopts = [
     "--cov=central_core_mqtt_shared",
     "--cov-report=term-missing",
     "--cov-report=xml",
-    "--cov-fail-under=80",
+    "--cov-fail-under=100",
 ]
 
 [tool.coverage.run]
