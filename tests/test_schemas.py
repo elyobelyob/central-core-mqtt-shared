@@ -198,3 +198,25 @@ class TestCommandAck:
     def test_invalid_status_rejected(self):
         with pytest.raises(ValidationError):
             CommandAck(command_id="c1", status="maybe", timestamp=1.0)
+
+    def test_delta_update_keeps_device_class(self):
+        """A partial (delta) update that carries attributes must keep device_class,
+        or the vault can't classify sensors such as a bedroom door (device_class
+        "opening"). Recovered from an old local copy of this repo."""
+        st = SensorsTelemetry.model_validate(
+            {
+                "partial": True,
+                "timestamp": 1234567890.0,
+                "sensors": [
+                    {
+                        "id": "binary_sensor.main_bedroom",
+                        "state": "on",
+                        "type": "binary_sensor",
+                        "attributes": {"device_class": "opening", "friendly_name": "Main Bedroom"},
+                    }
+                ],
+            }
+        )
+        sensor = st.sensors[0]
+        assert isinstance(sensor, FullSensor)
+        assert sensor.attributes.get("device_class") == "opening"
