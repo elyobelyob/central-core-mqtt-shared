@@ -35,7 +35,7 @@ class TestTopics:
         # store ack has no further levels, so neither sees the other.
         store = topics.build_topic(topics.STORE_ACK, hub_id="h", version=1).split("/")
         cmd = topics.build_subscription(
-            topics.ACK_GENERIC, hub_id="h", version=1, command_name="+", command_id="+"
+            topics.ACK_GENERIC, wildcards=("command_name", "command_id"), hub_id=topics.ANY_HUB, version=1
         ).split("/")
         assert len(store) == 4 and len(cmd) == 6
 

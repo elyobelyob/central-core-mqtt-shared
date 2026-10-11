@@ -171,3 +171,91 @@ class TestTimestampsAreFinite:
 
 def test_limits_are_module_level_constants():
     assert schemas.MAX_SENSORS == 10_000
+
+
+# ------------------------------------------------------------
+# Times, system readings and free-form dicts (v1.2.0)
+# ------------------------------------------------------------
+
+from central_core_mqtt_shared.schemas import (  # noqa: E402
+    MAX_DICT_KEYS,
+    MAX_TIMESTAMP,
+    MAX_UPTIME_S,
+    ConfigUpdateCommand as _Config,
+    GeneralTelemetry,
+    SystemTelemetry,
+    TunnelStartCommand,
+)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "9999-12-31T23:59:59-05:00",  # overflows when moved to UTC
+        "0001-01-01T00:00:00+05:00",
+        "3000-01-01T00:00:00Z",
+        "2999-12-31T23:00:00-02:00",  # the year 3000 in UTC
+    ],
+)
+def test_times_out_of_range_are_a_validation_error_not_an_overflow(value):
+    with pytest.raises(ValueError):
+        parse_utc_iso(value)
+    with pytest.raises(ValidationError):
+        OutboxFields(event_ts=value)
+
+
+def test_the_last_year_is_accepted():
+    assert parse_utc_iso("2999-12-31T23:59:59Z").year == 2999
+
+
+@pytest.mark.parametrize("bad", [-1.0, MAX_TIMESTAMP, 1e300])
+def test_epoch_timestamps_are_bounded(bad):
+    with pytest.raises(ValidationError):
+        StatusOnline(timestamp=bad)
+    with pytest.raises(ValidationError):
+        CommandAck(command_id="c", status="success", timestamp=bad)
+
+
+def test_epoch_timestamp_edges():
+    assert StatusOnline(timestamp=0).timestamp == 0
+    assert StatusOnline(timestamp=MAX_TIMESTAMP - 1).timestamp == MAX_TIMESTAMP - 1
+
+
+GOOD_SYSTEM = {"cpu": 12.5, "ram": 40.0, "uptime": 3600.0, "temperature": 48.0}
+
+
+def test_ordinary_system_readings_are_accepted():
+    assert SystemTelemetry(**GOOD_SYSTEM).cpu == 12.5
+    assert SystemTelemetry(cpu=0, ram=100, uptime=0).temperature is None
+
+
+@pytest.mark.parametrize(
+    "field,bad",
+    [
+        ("cpu", -0.1), ("cpu", 100.1), ("cpu", float("nan")), ("cpu", float("inf")),
+        ("ram", -1), ("ram", 101), ("ram", float("nan")),
+        ("uptime", -1), ("uptime", MAX_UPTIME_S + 1), ("uptime", float("inf")),
+        ("temperature", -101), ("temperature", 251), ("temperature", float("nan")),
+    ],
+)
+def test_system_readings_out_of_range_are_refused(field, bad):
+    with pytest.raises(ValidationError):
+        SystemTelemetry(**dict(GOOD_SYSTEM, **{field: bad}))
+
+
+def test_free_form_dicts_are_capped():
+    big = {f"k{i}": i for i in range(MAX_DICT_KEYS + 1)}
+    ok = {f"k{i}": i for i in range(MAX_DICT_KEYS)}
+    assert len(FullSensor(id="sensor.a", attributes=ok).attributes) == MAX_DICT_KEYS
+    for make in (
+        lambda d: FullSensor(id="sensor.a", attributes=d),
+        lambda d: EventTelemetry(event_type="door", timestamp=1.0, details=d),
+        lambda d: GeneralTelemetry(data=d),
+        lambda d: _Config(command_id="c", version=1, config=d),
+        lambda d: TunnelStartCommand(command_id="c", metadata=d),
+        lambda d: HAAddonTelemetry(timestamp=1.0, state=d),
+        lambda d: HAAddonCommand(command_id="c", action="a", data=d),
+        lambda d: OutboxRecord(seq=1, type="system", event_ts=TS, payload=d),
+    ):
+        with pytest.raises(ValidationError):
+            make(big)

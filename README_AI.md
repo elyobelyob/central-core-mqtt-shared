@@ -43,7 +43,10 @@ hubs/{hub_id}/v{version}/...
 
 Topics are defined in central-core-mqtt-shared/topics.py.
 
-The project must use build_topic() to generate all concrete MQTT topics.
+The project must use build_topic() to generate all concrete MQTT topics, and
+build_subscription(template, wildcards=(...), ...) for subscriptions with `+` levels
+(a hub: wildcards=("domain", "action") on CMD_GENERIC with its own hub_id; the vault:
+hub_id=ANY_HUB for every hub). Both refuse values that contain `/`, `+` or `#`.
 
 Sensor Handling Rules
 
@@ -176,7 +179,7 @@ Import rules
 Always import the shared MQTT library like this:
 
 from central_core_mqtt_shared import topics, schemas
-from central_core_mqtt_shared.topics import build_topic
+from central_core_mqtt_shared.topics import ANY_HUB, build_subscription, build_topic
 
 Do not redefine schemas or topics locally.
 

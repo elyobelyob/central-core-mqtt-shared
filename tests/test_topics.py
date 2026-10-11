@@ -106,10 +106,12 @@ def test_public_exports_are_importable():
 # ------------------------------------------------------------
 
 from central_core_mqtt_shared.topics import (  # noqa: E402
+    ANY_HUB,
     HUB_ID_PATTERN,
     MAX_SEGMENT_LENGTH,
     RESERVED_HUB_IDS,
     STORE_ACK,
+    TELEMETRY_BATCH,
     build_subscription,
     is_valid_hub_id,
     validate_hub_id,
@@ -128,67 +130,58 @@ def test_ordinary_hub_ids_are_accepted(hub_id):
     )
 
 
-@pytest.mark.parametrize(
-    "hub_id",
-    [
-        "",
-        "+",
-        "#",
-        "a/b",
-        "a/#",
-        "hub+",
-        "+/x",
-        "..",
-        ".hidden",
-        "-lead",
-        "has space",
-        "tab\t",
-        "new\nline",
-        "nul\x00",
-        "a" * 65,
-        "café",
-        "broadcast",
-        None,
-        7,
-        b"hub",
-    ],
-)
-def test_bad_hub_ids_are_refused(hub_id):
+BAD_HUB_IDS = [
+    "", "+", "#", "a/b", "a/#", "hub+", "+/x", "..", ".hidden", "-lead", "has space", "tab\t",
+    "new\nline", "nul\x00", "a" * 65, "caf\u00e9", "zero\u200bwidth", "broadcast", None, 7, b"hub",
+]
+
+
+@pytest.mark.parametrize("hub_id", BAD_HUB_IDS)
+def test_bad_hub_ids_are_refused_everywhere(hub_id):
     assert not is_valid_hub_id(hub_id)
     with pytest.raises(ValueError):
         validate_hub_id(hub_id)
     with pytest.raises(ValueError):
         build_topic(TELEMETRY_SYSTEM, hub_id=hub_id, version=1)
-    if hub_id != "+":  # the vault may subscribe with "+"; nothing else gets through
-        with pytest.raises(ValueError):
-            build_subscription(TELEMETRY_SYSTEM, hub_id=hub_id, version=1)
+    # a hub's own command subscription: "+" as its id must not become "every hub"
+    with pytest.raises(ValueError):
+        build_subscription(CMD_GENERIC, wildcards=("domain", "action"), hub_id=hub_id, version=1)
 
 
 def test_hub_id_pattern_and_reserved_ids_are_exported():
     assert "broadcast" in RESERVED_HUB_IDS
     assert HUB_ID_PATTERN.startswith("[A-Za-z0-9]")
     assert MAX_SEGMENT_LENGTH == 128
+    assert repr(ANY_HUB) == "ANY_HUB"
 
 
 @pytest.mark.parametrize(
-    "field,value",
+    "value",
     [
-        ("version", ""),
-        ("version", "1/../2"),
-        ("version", "+"),
-        ("version", "#"),
-        ("version", None),
-        ("version", "x" * (MAX_SEGMENT_LENGTH + 1)),
+        "", "1/../2", "+", "#", None, True, 1.5, b"1", ["1"],
+        "x" * (MAX_SEGMENT_LENGTH + 1),
+        "\u00e9" * 65,  # 65 characters but 130 UTF-8 bytes
     ],
 )
-def test_bad_version_is_refused(field, value):
-    kwargs = {"hub_id": "demo-home-001", "version": 1}
-    kwargs[field] = value
+def test_bad_version_is_refused(value):
     with pytest.raises(ValueError):
-        build_topic(TELEMETRY_SYSTEM, **kwargs)
+        build_topic(TELEMETRY_SYSTEM, hub_id="demo-home-001", version=value)
 
 
-@pytest.mark.parametrize("value", ["", "a/b", "a+b", "#", "+", "id with space", "id\x00", "id\n"])
+BAD_LEVELS = [
+    "", "a/b", "a+b", "#", "+", "id with space", "id\x00", "id\n", "id\t",
+    "a\u200bb",  # zero-width space (Cf)
+    "a\u202eb",  # right-to-left override (Cf)
+    "a\u0085b",  # C1 control (NEL)
+    "a\u009bb",  # C1 control (CSI)
+    "a\u2028b",  # line separator
+    "a\u00a0b",  # no-break space
+    "a\ud800b",  # lone surrogate
+    "a\ufeffb",  # byte order mark (Cf)
+]
+
+
+@pytest.mark.parametrize("value", BAD_LEVELS)
 def test_bad_command_levels_are_refused(value):
     with pytest.raises(ValueError):
         build_topic(CMD_GENERIC, hub_id="demo-home-001", version=1, domain=value, action="run")
@@ -204,6 +197,17 @@ def test_bad_command_levels_are_refused(value):
         )
     with pytest.raises(ValueError):
         build_topic(BROADCAST_CMD, version=1, command=value)
+
+
+def test_the_length_limit_is_in_utf8_bytes():
+    assert build_topic(BROADCAST_CMD, version=1, command="x" * MAX_SEGMENT_LENGTH)
+    assert build_topic(BROADCAST_CMD, version=1, command="\u00e9" * 64)  # 128 bytes
+    with pytest.raises(ValueError, match="bytes"):
+        build_topic(BROADCAST_CMD, version=1, command="\u00e9" * 64 + "x")
+
+
+def test_printable_unicode_is_allowed_in_non_hub_levels():
+    assert build_topic(BROADCAST_CMD, version=1, command="caf\u00e9") == "hubs/broadcast/v1/cmd/caf\u00e9"
 
 
 def test_vault_style_command_ids_are_accepted():
@@ -232,31 +236,107 @@ def test_build_topic_still_reports_a_missing_placeholder_as_key_error():
         build_topic(CMD_GENERIC, hub_id="h", version=1, domain="d")
 
 
+@pytest.mark.parametrize(
+    "template",
+    [
+        "hubs/{hub_id:>70}/x",
+        "hubs/{hub_id!r}/x",
+        "hubs/{hub_id!s:.3}/x",
+        "hubs/{hub_id.__class__}/x",
+        "hubs/{hub_id[0]}/x",
+        "hubs/{}/x",
+        "hubs/{0}/x",
+        "hubs/{hub_id/x",
+        "hubs/}/x",
+    ],
+)
+def test_templates_may_only_use_plain_placeholders(template):
+    with pytest.raises(ValueError):
+        build_topic(template, hub_id="demo-home-001")
+    with pytest.raises(ValueError):
+        build_subscription(template, hub_id="demo-home-001")
+
+
+def test_a_template_must_be_a_string():
+    with pytest.raises(ValueError):
+        build_topic(None, hub_id="h")  # type: ignore[arg-type]
+
+
+def test_any_hub_is_not_a_topic_value():
+    with pytest.raises(ValueError, match="build_subscription"):
+        build_topic(TELEMETRY_SYSTEM, hub_id=ANY_HUB, version=1)
+
+
 class TestBuildSubscription:
-    def test_allows_the_single_level_wildcard_for_the_vault(self):
+    def test_a_hub_subscribes_to_its_own_commands(self):
         assert (
-            build_subscription(TELEMETRY_SYSTEM, hub_id="+", version=1)
-            == "hubs/+/v1/telemetry/system"
+            build_subscription(CMD_GENERIC, wildcards=("domain", "action"), hub_id="demo-home-001", version=1)
+            == "hubs/demo-home-001/v1/cmd/+/+"
         )
+        # wildcard levels may also be given as "+"
         assert (
             build_subscription(
-                ACK_GENERIC, hub_id="+", version=1, command_name="+", command_id="+"
+                CMD_GENERIC, wildcards=["domain", "action"], hub_id="demo-home-001", version=1,
+                domain="+", action="+",
             )
-            == "hubs/+/v1/ack/+/+"
+            == "hubs/demo-home-001/v1/cmd/+/+"
         )
 
-    def test_renders_a_concrete_hub_like_build_topic(self):
+    def test_the_vault_subscribes_for_every_hub_only_with_any_hub(self):
+        assert build_subscription(TELEMETRY_SYSTEM, hub_id=ANY_HUB, version=1) == "hubs/+/v1/telemetry/system"
+        assert (
+            build_subscription(ACK_GENERIC, wildcards=("command_name", "command_id"), hub_id=ANY_HUB, version=1)
+            == "hubs/+/v1/ack/+/+"
+        )
+        assert build_subscription(TELEMETRY_BATCH, hub_id=ANY_HUB, version=1) == "hubs/+/v1/telemetry/batch"
+
+    def test_without_wildcards_it_renders_a_concrete_topic(self):
         assert build_subscription(STORE_ACK, hub_id="demo-home-001", version=1) == (
             build_topic(STORE_ACK, hub_id="demo-home-001", version=1)
         )
 
-    @pytest.mark.parametrize("value", ["#", "hub+", "+x", "a/b", "", "hub/+"])
-    def test_still_refuses_everything_else(self, value):
+    def test_a_plus_in_a_level_not_named_as_a_wildcard_is_refused(self):
+        with pytest.raises(ValueError):
+            build_subscription(CMD_GENERIC, wildcards=("domain",), hub_id="h", version=1, action="+")
+        with pytest.raises(ValueError):
+            build_subscription(TELEMETRY_SYSTEM, hub_id="+", version=1)
+        with pytest.raises(ValueError):
+            build_subscription(ACK_GENERIC, hub_id=ANY_HUB, version=1, command_name="+", command_id="+")
+
+    def test_hub_id_is_never_a_named_wildcard(self):
+        with pytest.raises(ValueError, match="ANY_HUB"):
+            build_subscription(TELEMETRY_SYSTEM, wildcards=("hub_id",), version=1)
+
+    def test_a_wildcard_must_fill_a_whole_level(self):
+        with pytest.raises(ValueError, match="whole"):
+            build_subscription(TELEMETRY_SYSTEM, wildcards=("version",), hub_id="h")  # would give "v+"
+        assert build_subscription("{a}/x/{b}", wildcards=("a", "b")) == "+/x/+"
+        with pytest.raises(ValueError, match="whole"):
+            build_subscription("x{a}/y", wildcards=("a",))
+        with pytest.raises(ValueError, match="whole"):
+            build_subscription("x/{a}y", wildcards=("a",))
+
+    def test_a_wildcard_level_cannot_be_given_another_value(self):
+        with pytest.raises(ValueError, match="wildcard level"):
+            build_subscription(CMD_GENERIC, wildcards=("domain", "action"), hub_id="h", version=1, domain="x")
+
+    def test_unknown_wildcard_names_are_refused(self):
+        with pytest.raises(ValueError, match="not in the template"):
+            build_subscription(TELEMETRY_SYSTEM, wildcards=("domain",), hub_id="h", version=1)
+
+    def test_wildcards_must_be_a_sequence_of_names(self):
+        with pytest.raises(ValueError, match="sequence"):
+            build_subscription(CMD_GENERIC, wildcards="domain", hub_id="h", version=1, action="a")
+
+    @pytest.mark.parametrize("value", ["#", "hub+", "+x", "a/b", "", "hub/+", "\u202e"])
+    def test_still_refuses_bad_values(self, value):
         with pytest.raises(ValueError):
             build_subscription(TELEMETRY_SYSTEM, hub_id=value, version=1)
         with pytest.raises(ValueError):
-            build_subscription(TELEMETRY_SYSTEM, hub_id="+", version=value)
+            build_subscription(TELEMETRY_SYSTEM, hub_id=ANY_HUB, version=value)
 
     def test_build_topic_never_allows_the_wildcard(self):
         with pytest.raises(ValueError):
             build_topic(TELEMETRY_SYSTEM, hub_id="+", version=1)
+        with pytest.raises(ValueError):
+            build_topic(CMD_GENERIC, hub_id="h", version=1, domain="+", action="+")
