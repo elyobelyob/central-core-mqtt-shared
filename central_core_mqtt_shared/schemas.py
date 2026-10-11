@@ -6,6 +6,34 @@ from enum import Enum
 
 
 # ============================================================
+# LIMITS
+#
+# Messages come off the network, so every number and list a schema accepts has
+# an upper bound. The bounds are far above what a real hub sends; they only
+# keep a forged or broken message from reaching a database as a huge number or
+# an enormous list.
+# ============================================================
+
+# Largest sequence number or counter: what a signed 64-bit database column holds.
+MAX_SEQ = 2**63 - 1
+
+# Longest ISO 8601 time string we will try to parse (real ones are about 35).
+MAX_TIME_LENGTH = 64
+
+# Most sensors in one sensors telemetry message.
+MAX_SENSORS = 10_000
+
+# Home Assistant entity ids are at most 255 characters.
+MAX_ENTITY_ID_LENGTH = 255
+
+# Longest command id (the vault issues 22-character url-safe tokens).
+MAX_COMMAND_ID_LENGTH = 128
+
+# Longest free-text message in a command acknowledgement.
+MAX_ACK_MESSAGE_LENGTH = 4096
+
+
+# ============================================================
 # TIME HELPERS (protocol 1.1: store and confirm)
 # ============================================================
 
@@ -19,6 +47,8 @@ def parse_utc_iso(value: Any) -> datetime:
     if isinstance(value, datetime):
         dt = value
     elif isinstance(value, str) and value.strip():
+        if len(value) > MAX_TIME_LENGTH:
+            raise ValueError("not an ISO 8601 time: too long")
         try:
             dt = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
         except ValueError as exc:
@@ -88,10 +118,10 @@ class OutboxFields(BaseModel):
       the vault knows where the unbroken run it acknowledges starts.
     - `hub_time`: the hub's clock when it sent the message (clock check).
     """
-    seq: Optional[int] = Field(None, ge=1)
+    seq: Optional[int] = Field(None, ge=1, le=MAX_SEQ)
     event_ts: Optional[str] = None
     outbox_id: Optional[str] = Field(None, min_length=1, max_length=64)
-    oldest_seq: Optional[int] = Field(None, ge=1)
+    oldest_seq: Optional[int] = Field(None, ge=1, le=MAX_SEQ)
     hub_time: Optional[str] = None
 
     @field_validator("event_ts", "hub_time", mode="before")
@@ -111,9 +141,9 @@ class BasicSensor(BaseModel):
     - full basic discovery list
     - delta updates
     """
-    id: str
+    id: str = Field(..., max_length=MAX_ENTITY_ID_LENGTH)
     state: Optional[Any] = None
-    type: Optional[str] = None
+    type: Optional[str] = Field(None, max_length=MAX_ENTITY_ID_LENGTH)
 
 
 class FullSensor(BaseModel):
@@ -124,10 +154,10 @@ class FullSensor(BaseModel):
     All fields except `id` have defaults so Basic-shaped payloads
     (`{id, state}` or `{id, state, type}`) validate against FullSensor too.
     """
-    id: str
+    id: str = Field(..., max_length=MAX_ENTITY_ID_LENGTH)
     state: Optional[Any] = None
-    type: Optional[str] = None
-    unit: Optional[str] = None
+    type: Optional[str] = Field(None, max_length=MAX_ENTITY_ID_LENGTH)
+    unit: Optional[str] = Field(None, max_length=MAX_ENTITY_ID_LENGTH)
     attributes: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -144,8 +174,8 @@ class SensorsTelemetry(OutboxFields):
     construct BasicSensor instances directly (test suites, legacy code).
     """
     partial: bool
-    timestamp: float
-    sensors: List[Union[FullSensor, BasicSensor]]
+    timestamp: float = Field(..., allow_inf_nan=False)
+    sensors: List[Union[FullSensor, BasicSensor]] = Field(..., max_length=MAX_SENSORS)
 
 
 # ============================================================
@@ -161,7 +191,7 @@ class SystemTelemetry(OutboxFields):
 
 class EventTelemetry(OutboxFields):
     event_type: EventType
-    timestamp: float
+    timestamp: float = Field(..., allow_inf_nan=False)
     details: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -175,12 +205,12 @@ class GeneralTelemetry(OutboxFields):
 
 class StatusOnline(BaseModel):
     status: str = "online"
-    timestamp: float
+    timestamp: float = Field(..., allow_inf_nan=False)
 
 
 class StatusOffline(BaseModel):
     status: str = "offline"
-    timestamp: float
+    timestamp: float = Field(..., allow_inf_nan=False)
 
 
 # ============================================================
@@ -188,17 +218,17 @@ class StatusOffline(BaseModel):
 # ============================================================
 
 class CommandBase(BaseModel):
-    command_id: str
+    command_id: str = Field(..., min_length=1, max_length=MAX_COMMAND_ID_LENGTH)
 
 
 class ConfigUpdateCommand(CommandBase):
-    version: int
+    version: int = Field(..., ge=0, le=MAX_SEQ)
     config: Dict[str, Any]
 
 
 class FirmwareUpdateCommand(CommandBase):
-    download_url: str
-    checksum: str
+    download_url: str = Field(..., max_length=2048)
+    checksum: str = Field(..., max_length=256)
 
 
 class TunnelStartCommand(CommandBase):
@@ -214,7 +244,7 @@ class SensorsPollCommand(CommandBase):
     Vault requests full metadata for ONE sensor.
     entity_id must match e.g. sensor.kitchen_temp
     """
-    entity_id: str
+    entity_id: str = Field(..., max_length=MAX_ENTITY_ID_LENGTH)
 
 
 class SensorsSetCommand(CommandBase):
@@ -230,17 +260,17 @@ class SensorsSetCommand(CommandBase):
 
 class HAAddonTelemetry(OutboxFields):
     state: Dict[str, Any] = Field(default_factory=dict)
-    timestamp: float
+    timestamp: float = Field(..., allow_inf_nan=False)
 
 
 class HAAddonStatus(BaseModel):
     online: bool
-    version: str
-    timestamp: float
+    version: str = Field(..., max_length=64)
+    timestamp: float = Field(..., allow_inf_nan=False)
 
 
 class HAAddonCommand(CommandBase):
-    action: str
+    action: str = Field(..., max_length=MAX_COMMAND_ID_LENGTH)
     data: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -249,10 +279,10 @@ class HAAddonCommand(CommandBase):
 # ============================================================
 
 class CommandAck(BaseModel):
-    command_id: str
+    command_id: str = Field(..., min_length=1, max_length=MAX_COMMAND_ID_LENGTH)
     status: AckStatus
-    message: Optional[str] = None
-    timestamp: float
+    message: Optional[str] = Field(None, max_length=MAX_ACK_MESSAGE_LENGTH)
+    timestamp: float = Field(..., allow_inf_nan=False)
 
 
 # ============================================================
@@ -275,7 +305,7 @@ class OutboxRecord(BaseModel):
     `queued_at` is when the hub stored the reading, which is not when it
     happened (`event_ts`).
     """
-    seq: int = Field(..., ge=1)
+    seq: int = Field(..., ge=1, le=MAX_SEQ)
     type: str
     event_ts: str
     queued_at: Optional[str] = None
@@ -307,7 +337,7 @@ class TelemetryBatch(BaseModel):
     """
     hub_time: str
     outbox_id: Optional[str] = Field(None, min_length=1, max_length=64)
-    oldest_seq: Optional[int] = Field(None, ge=1)
+    oldest_seq: Optional[int] = Field(None, ge=1, le=MAX_SEQ)
     records: List[OutboxRecord] = Field(..., min_length=1, max_length=MAX_BATCH_RECORDS)
 
     @field_validator("hub_time", mode="before")
@@ -325,8 +355,8 @@ class StoreAck(BaseModel):
     acknowledgement, for logs. `outbox_id`, when given, names the outbox the
     acknowledgement is for: a hub ignores an acknowledgement for another one.
     """
-    upto: int = Field(..., ge=0)
-    stored: int = Field(0, ge=0)
+    upto: int = Field(..., ge=0, le=MAX_SEQ)
+    stored: int = Field(0, ge=0, le=MAX_SEQ)
     outbox_id: Optional[str] = Field(None, min_length=1, max_length=64)
 
 

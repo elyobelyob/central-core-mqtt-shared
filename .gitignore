@@ -16,3 +16,7 @@ dist/
 .idea/
 .DS_Store
 .env
+.env.*
+!.env.example
+*.key
+*.pem

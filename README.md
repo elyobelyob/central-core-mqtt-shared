@@ -15,7 +15,8 @@ Central Core helps families look after someone living with dementia at home. Dem
 
 ## Protocol basics
 - All hub-scoped topics are versioned: `hubs/{hub_id}/v{version}/...`.
-- Use `central_core_mqtt_shared.topics.build_topic()` to render concrete topics.
+- Use `central_core_mqtt_shared.topics.build_topic()` to render concrete topics. It refuses a hub id or any other topic level containing `/`, `+`, `#`, white space or control characters (and an empty one) with a `ValueError`. A subscriber that needs the single-level wildcard `+` (the vault) uses `build_subscription()`; hubs never do.
+- Numbers and lists in the Pydantic models have upper bounds (sequence numbers fit a signed 64-bit integer, see `schemas.MAX_SEQ`).
 - Payloads are validated with the Pydantic models in `central_core_mqtt_shared.schemas`.
 
 ## MQTT endpoints (topics)
