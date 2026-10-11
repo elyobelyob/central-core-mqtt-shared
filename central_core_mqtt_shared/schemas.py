@@ -1,6 +1,7 @@
 from __future__ import annotations
+import json
 from datetime import datetime, timezone
-from pydantic import BaseModel, Field, field_validator
+from pydantic import AfterValidator, BaseModel, Field, field_validator
 from typing import Annotated, Optional, Dict, Any, Union, List
 from enum import Enum
 
@@ -42,11 +43,50 @@ MAX_YEAR = 2999
 # System telemetry: percentages, an uptime of at most 100 years, a temperature in degrees C.
 MAX_UPTIME_S = 100 * 365.25 * 24 * 3600
 
+# Largest free-form value, measured as compact JSON in UTF-8 bytes.
+MAX_STATE_BYTES = 4 * 1024  # one sensor state (Home Assistant itself keeps them to 255 characters)
+MAX_ATTRIBUTES_BYTES = 64 * 1024  # one sensor's attributes
+MAX_FREE_JSON_BYTES = 256 * 1024  # any other free-form object (details, config, payload, ...)
+
+# Longest status word in StatusOnline / StatusOffline.
+MAX_STATUS_LENGTH = 32
+
+
+def _json_bytes_at_most(limit: int):
+    """A validator: the value, as compact JSON, is at most `limit` UTF-8 bytes."""
+
+    def check(value: Any) -> Any:
+        if value is None:
+            return value
+        if isinstance(value, str):
+            size = len(value.encode("utf-8", "surrogatepass"))
+        else:
+            try:
+                size = len(json.dumps(value, default=str, separators=(",", ":")).encode("utf-8", "surrogatepass"))
+            except (TypeError, ValueError, RecursionError):
+                raise ValueError("not representable as JSON") from None
+        if size > limit:
+            raise ValueError(f"larger than {limit} bytes")
+        return value
+
+    return check
+
+
 Timestamp = Annotated[float, Field(ge=0, lt=MAX_TIMESTAMP, allow_inf_nan=False)]
 """Seconds since the epoch, finite, from 1970 to before the year 3000."""
 
-FreeDict = Annotated[Dict[str, Any], Field(max_length=MAX_DICT_KEYS)]
-"""A free-form JSON object of at most MAX_DICT_KEYS keys."""
+FreeDict = Annotated[
+    Dict[str, Any], Field(max_length=MAX_DICT_KEYS), AfterValidator(_json_bytes_at_most(MAX_FREE_JSON_BYTES))
+]
+"""A free-form JSON object: at most MAX_DICT_KEYS keys and MAX_FREE_JSON_BYTES as JSON."""
+
+AttributesDict = Annotated[
+    Dict[str, Any], Field(max_length=MAX_DICT_KEYS), AfterValidator(_json_bytes_at_most(MAX_ATTRIBUTES_BYTES))
+]
+"""One sensor's attributes: at most MAX_DICT_KEYS keys and MAX_ATTRIBUTES_BYTES as JSON."""
+
+SensorState = Annotated[Optional[Any], AfterValidator(_json_bytes_at_most(MAX_STATE_BYTES))]
+"""One sensor state: at most MAX_STATE_BYTES (a string's own bytes, anything else as JSON)."""
 
 
 # ============================================================
@@ -164,7 +204,7 @@ class BasicSensor(BaseModel):
     - delta updates
     """
     id: str = Field(..., max_length=MAX_ENTITY_ID_LENGTH)
-    state: Optional[Any] = None
+    state: SensorState = None
     type: Optional[str] = Field(None, max_length=MAX_ENTITY_ID_LENGTH)
 
 
@@ -177,10 +217,10 @@ class FullSensor(BaseModel):
     (`{id, state}` or `{id, state, type}`) validate against FullSensor too.
     """
     id: str = Field(..., max_length=MAX_ENTITY_ID_LENGTH)
-    state: Optional[Any] = None
+    state: SensorState = None
     type: Optional[str] = Field(None, max_length=MAX_ENTITY_ID_LENGTH)
     unit: Optional[str] = Field(None, max_length=MAX_ENTITY_ID_LENGTH)
-    attributes: FreeDict = Field(default_factory=dict)
+    attributes: AttributesDict = Field(default_factory=dict)
 
 
 class SensorsTelemetry(OutboxFields):
@@ -211,6 +251,16 @@ class SystemTelemetry(OutboxFields):
     temperature: Optional[float] = Field(
         None, ge=-100, le=250, allow_inf_nan=False, description="System temperature in degrees C"
     )
+    # Since v1.2.0, optional (None from older hubs): is Home Assistant feeding
+    # the hub? A hub whose Home Assistant websocket is down still sends
+    # heartbeats, but no door or motion changes reach the vault.
+    ha_connected: Optional[bool] = Field(None, description="Home Assistant websocket connected")
+    ha_last_event_at: Optional[str] = Field(None, description="Last event from Home Assistant, UTC ISO 8601")
+
+    @field_validator("ha_last_event_at", mode="before")
+    @classmethod
+    def _ha_last_event_utc(cls, value: Any) -> Optional[str]:
+        return _optional_utc_iso(value)
 
 
 class EventTelemetry(OutboxFields):
@@ -228,12 +278,12 @@ class GeneralTelemetry(OutboxFields):
 # ============================================================
 
 class StatusOnline(BaseModel):
-    status: str = "online"
+    status: str = Field("online", max_length=MAX_STATUS_LENGTH)
     timestamp: Timestamp
 
 
 class StatusOffline(BaseModel):
-    status: str = "offline"
+    status: str = Field("offline", max_length=MAX_STATUS_LENGTH)
     timestamp: Timestamp
 
 
