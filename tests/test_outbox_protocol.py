@@ -34,7 +34,7 @@ class TestTopics:
         # The vault subscribes to hubs/+/v1/ack/+/+ for command acks; the
         # store ack has no further levels, so neither sees the other.
         store = topics.build_topic(topics.STORE_ACK, hub_id="h", version=1).split("/")
-        cmd = topics.build_topic(
+        cmd = topics.build_subscription(
             topics.ACK_GENERIC, hub_id="h", version=1, command_name="+", command_id="+"
         ).split("/")
         assert len(store) == 4 and len(cmd) == 6

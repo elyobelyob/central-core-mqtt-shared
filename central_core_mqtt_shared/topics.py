@@ -21,7 +21,11 @@ Placeholders:
     {command_id}  : unique identifier for a specific command instance
 
 Use `build_topic(TEMPLATE, hub_id="...", version=1, ...)` to generate concrete topics.
+Values are validated; the vault's wildcard subscriptions use `build_subscription`.
 """
+
+import re
+import string
 
 
 # ============================================================
@@ -161,15 +165,107 @@ BROADCAST_CMD = "hubs/broadcast/v{version}/cmd/{command}"
 # Helper
 # ============================================================
 
+# A hub id is one MQTT topic level, so it must never contain `/`, `+` or `#`
+# (a `+` would make a hub subscribe to every hub's commands). Real ids look
+# like `abc-001`; the pattern also allows upper case, `.` and `_` (an id the
+# add-on derived from a host name) and a single character, so ids that hubs
+# already use keep working.
+HUB_ID_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}"
+_HUB_ID_RE = re.compile(HUB_ID_PATTERN)
+
+# `hubs/broadcast/...` is the broadcast namespace: a hub of that name would
+# receive (and could publish) broadcast traffic.
+RESERVED_HUB_IDS = frozenset({"broadcast"})
+
+# Longest value accepted for any other topic level (command ids, domains, ...).
+MAX_SEGMENT_LENGTH = 128
+
+# Characters that end or reshape a topic level: separators, wildcards, control
+# characters (NUL included) and white space.
+_BAD_SEGMENT_CHARS = re.compile(r"[/+#\x00-\x1f\x7f\s]")
+
+_SINGLE_LEVEL_WILDCARD = "+"
+
+
+def is_valid_hub_id(hub_id: object) -> bool:
+    """True when `hub_id` is safe to use as the hub level of a topic."""
+    return (
+        isinstance(hub_id, str)
+        and _HUB_ID_RE.fullmatch(hub_id) is not None
+        and hub_id not in RESERVED_HUB_IDS
+    )
+
+
+def validate_hub_id(hub_id: object) -> str:
+    """Return `hub_id` unchanged, or raise ValueError if it is not a valid hub id."""
+    if not is_valid_hub_id(hub_id):
+        raise ValueError(f"invalid hub id: {hub_id!r}")
+    return str(hub_id)
+
+
+def _segment(name: str, value: object, allow_wildcard: bool) -> str:
+    """One topic level, checked. Raises ValueError for anything that could
+    change the shape of the topic."""
+    if allow_wildcard and value == _SINGLE_LEVEL_WILDCARD:
+        return _SINGLE_LEVEL_WILDCARD
+    if name == "hub_id":
+        # Strings only: an integer database key is not a hub id.
+        return validate_hub_id(value)
+    if value is None or isinstance(value, (bytes, bytearray)):
+        raise ValueError(f"topic field {name!r} must be a string or number, not {value!r}")
+    text = str(value)
+    if not text:
+        raise ValueError(f"topic field {name!r} is empty")
+    if len(text) > MAX_SEGMENT_LENGTH:
+        raise ValueError(f"topic field {name!r} is longer than {MAX_SEGMENT_LENGTH} characters")
+    if _BAD_SEGMENT_CHARS.search(text):
+        raise ValueError(f"topic field {name!r} contains a character not allowed in a topic level")
+    return text
+
+
+def _render(template: str, fields: dict, allow_wildcard: bool) -> str:
+    safe = dict(fields)
+    for _, name, _, _ in string.Formatter().parse(template):
+        # Only plain `{name}` fields are used by our templates; a field that is
+        # missing is left for str.format to report as a KeyError.
+        if name and name in fields:
+            safe[name] = _segment(name, fields[name], allow_wildcard)
+    return template.format(**safe)
+
+
 def build_topic(template: str, **kwargs) -> str:
     """
     Render a topic template with the required placeholders.
+
+    Every placeholder value is checked: a `hub_id` must match `HUB_ID_PATTERN`
+    (and not be reserved), any other value must be non-empty and free of `/`,
+    `+`, `#`, control characters and white space. A bad value raises
+    ValueError, so a stray wildcard can never widen a publish or a
+    subscription. A missing placeholder still raises KeyError; extra keyword
+    arguments are ignored.
+
+    To subscribe with a `+` in a level, use `build_subscription`.
 
     Example:
         build_topic(TELEMETRY_SYSTEM, hub_id="hub123", version=1)
     ->  "hubs/hub123/v1/telemetry/system"
     """
-    return template.format(**kwargs)
+    return _render(template, kwargs, allow_wildcard=False)
+
+
+def build_subscription(template: str, **kwargs) -> str:
+    """
+    Like `build_topic`, but a level may be the single-level wildcard `+`.
+
+    For the vault's subscriptions (for example `hub_id="+"` to hear every
+    hub). The multi-level `#` and any `+` mixed into other text are still
+    refused. Hubs must use `build_topic`, never this.
+
+    Example:
+        build_subscription(TELEMETRY_SYSTEM, hub_id="+", version=1)
+    ->  "hubs/+/v1/telemetry/system"
+    """
+    return _render(template, kwargs, allow_wildcard=True)
 
 
 # ============================================================
@@ -209,7 +305,13 @@ __all__ = [
     # Broadcast
     "BROADCAST_CMD",
 
-    # Helper
+    # Helpers
     "build_topic",
+    "build_subscription",
+    "validate_hub_id",
+    "is_valid_hub_id",
+    "HUB_ID_PATTERN",
+    "RESERVED_HUB_IDS",
+    "MAX_SEGMENT_LENGTH",
 ]
 
