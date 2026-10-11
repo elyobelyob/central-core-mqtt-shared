@@ -1,7 +1,7 @@
 from __future__ import annotations
 from datetime import datetime, timezone
 from pydantic import BaseModel, Field, field_validator
-from typing import Optional, Dict, Any, Union, List
+from typing import Annotated, Optional, Dict, Any, Union, List
 from enum import Enum
 
 
@@ -32,6 +32,22 @@ MAX_COMMAND_ID_LENGTH = 128
 # Longest free-text message in a command acknowledgement.
 MAX_ACK_MESSAGE_LENGTH = 4096
 
+# Most keys in one free-form dict (attributes, details, config, ...).
+MAX_DICT_KEYS = 10_000
+
+# Epoch-second timestamps must be finite, not negative, and before the year 3000.
+MAX_TIMESTAMP = 32503680000.0  # 3000-01-01T00:00:00Z
+MAX_YEAR = 2999
+
+# System telemetry: percentages, an uptime of at most 100 years, a temperature in degrees C.
+MAX_UPTIME_S = 100 * 365.25 * 24 * 3600
+
+Timestamp = Annotated[float, Field(ge=0, lt=MAX_TIMESTAMP, allow_inf_nan=False)]
+"""Seconds since the epoch, finite, from 1970 to before the year 3000."""
+
+FreeDict = Annotated[Dict[str, Any], Field(max_length=MAX_DICT_KEYS)]
+"""A free-form JSON object of at most MAX_DICT_KEYS keys."""
+
 
 # ============================================================
 # TIME HELPERS (protocol 1.1: store and confirm)
@@ -57,7 +73,13 @@ def parse_utc_iso(value: Any) -> datetime:
         raise ValueError(f"not an ISO 8601 time: {value!r}")
     if dt.tzinfo is None or dt.utcoffset() is None:
         raise ValueError(f"time has no UTC offset: {value!r}")
-    return dt.astimezone(timezone.utc)
+    try:
+        utc = dt.astimezone(timezone.utc)
+    except OverflowError:  # e.g. year 9999 with a negative offset, or year 1 with a positive one
+        raise ValueError(f"time out of range: {value!r}") from None
+    if utc.year > MAX_YEAR:
+        raise ValueError(f"time out of range: {value!r}")
+    return utc
 
 
 def to_utc_iso(value: Any) -> str:
@@ -158,7 +180,7 @@ class FullSensor(BaseModel):
     state: Optional[Any] = None
     type: Optional[str] = Field(None, max_length=MAX_ENTITY_ID_LENGTH)
     unit: Optional[str] = Field(None, max_length=MAX_ENTITY_ID_LENGTH)
-    attributes: Dict[str, Any] = Field(default_factory=dict)
+    attributes: FreeDict = Field(default_factory=dict)
 
 
 class SensorsTelemetry(OutboxFields):
@@ -174,7 +196,7 @@ class SensorsTelemetry(OutboxFields):
     construct BasicSensor instances directly (test suites, legacy code).
     """
     partial: bool
-    timestamp: float = Field(..., allow_inf_nan=False)
+    timestamp: Timestamp
     sensors: List[Union[FullSensor, BasicSensor]] = Field(..., max_length=MAX_SENSORS)
 
 
@@ -183,20 +205,22 @@ class SensorsTelemetry(OutboxFields):
 # ============================================================
 
 class SystemTelemetry(OutboxFields):
-    cpu: float = Field(..., description="CPU usage percentage")
-    ram: float = Field(..., description="RAM usage percentage")
-    uptime: float = Field(..., description="Uptime in seconds")
-    temperature: Optional[float] = Field(None, description="System temperature")
+    cpu: float = Field(..., ge=0, le=100, allow_inf_nan=False, description="CPU usage percentage")
+    ram: float = Field(..., ge=0, le=100, allow_inf_nan=False, description="RAM usage percentage")
+    uptime: float = Field(..., ge=0, le=MAX_UPTIME_S, allow_inf_nan=False, description="Uptime in seconds")
+    temperature: Optional[float] = Field(
+        None, ge=-100, le=250, allow_inf_nan=False, description="System temperature in degrees C"
+    )
 
 
 class EventTelemetry(OutboxFields):
     event_type: EventType
-    timestamp: float = Field(..., allow_inf_nan=False)
-    details: Dict[str, Any] = Field(default_factory=dict)
+    timestamp: Timestamp
+    details: FreeDict = Field(default_factory=dict)
 
 
 class GeneralTelemetry(OutboxFields):
-    data: Dict[str, Any] = Field(default_factory=dict)
+    data: FreeDict = Field(default_factory=dict)
 
 
 # ============================================================
@@ -205,12 +229,12 @@ class GeneralTelemetry(OutboxFields):
 
 class StatusOnline(BaseModel):
     status: str = "online"
-    timestamp: float = Field(..., allow_inf_nan=False)
+    timestamp: Timestamp
 
 
 class StatusOffline(BaseModel):
     status: str = "offline"
-    timestamp: float = Field(..., allow_inf_nan=False)
+    timestamp: Timestamp
 
 
 # ============================================================
@@ -223,7 +247,7 @@ class CommandBase(BaseModel):
 
 class ConfigUpdateCommand(CommandBase):
     version: int = Field(..., ge=0, le=MAX_SEQ)
-    config: Dict[str, Any]
+    config: FreeDict
 
 
 class FirmwareUpdateCommand(CommandBase):
@@ -232,11 +256,11 @@ class FirmwareUpdateCommand(CommandBase):
 
 
 class TunnelStartCommand(CommandBase):
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+    metadata: FreeDict = Field(default_factory=dict)
 
 
 class TunnelStopCommand(CommandBase):
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+    metadata: FreeDict = Field(default_factory=dict)
 
 
 class SensorsPollCommand(CommandBase):
@@ -251,7 +275,7 @@ class SensorsSetCommand(CommandBase):
     """
     Push sensor configuration updates.
     """
-    settings: Dict[str, Any] = Field(default_factory=dict)
+    settings: FreeDict = Field(default_factory=dict)
 
 
 # ============================================================
@@ -259,19 +283,19 @@ class SensorsSetCommand(CommandBase):
 # ============================================================
 
 class HAAddonTelemetry(OutboxFields):
-    state: Dict[str, Any] = Field(default_factory=dict)
-    timestamp: float = Field(..., allow_inf_nan=False)
+    state: FreeDict = Field(default_factory=dict)
+    timestamp: Timestamp
 
 
 class HAAddonStatus(BaseModel):
     online: bool
     version: str = Field(..., max_length=64)
-    timestamp: float = Field(..., allow_inf_nan=False)
+    timestamp: Timestamp
 
 
 class HAAddonCommand(CommandBase):
     action: str = Field(..., max_length=MAX_COMMAND_ID_LENGTH)
-    data: Dict[str, Any] = Field(default_factory=dict)
+    data: FreeDict = Field(default_factory=dict)
 
 
 # ============================================================
@@ -282,7 +306,7 @@ class CommandAck(BaseModel):
     command_id: str = Field(..., min_length=1, max_length=MAX_COMMAND_ID_LENGTH)
     status: AckStatus
     message: Optional[str] = Field(None, max_length=MAX_ACK_MESSAGE_LENGTH)
-    timestamp: float = Field(..., allow_inf_nan=False)
+    timestamp: Timestamp
 
 
 # ============================================================
@@ -309,7 +333,7 @@ class OutboxRecord(BaseModel):
     type: str
     event_ts: str
     queued_at: Optional[str] = None
-    payload: Dict[str, Any] = Field(default_factory=dict)
+    payload: FreeDict = Field(default_factory=dict)
 
     @field_validator("type")
     @classmethod

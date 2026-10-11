@@ -15,8 +15,9 @@ Central Core helps families look after someone living with dementia at home. Dem
 
 ## Protocol basics
 - All hub-scoped topics are versioned: `hubs/{hub_id}/v{version}/...`.
-- Use `central_core_mqtt_shared.topics.build_topic()` to render concrete topics. It refuses a hub id or any other topic level containing `/`, `+`, `#`, white space or control characters (and an empty one) with a `ValueError`. A subscriber that needs the single-level wildcard `+` (the vault) uses `build_subscription()`; hubs never do.
-- Numbers and lists in the Pydantic models have upper bounds (sequence numbers fit a signed 64-bit integer, see `schemas.MAX_SEQ`).
+- Use `central_core_mqtt_shared.topics.build_topic()` to render concrete topics. It checks every value: a hub id must match `topics.HUB_ID_PATTERN`; any other level must be a non-empty string or integer of at most 128 UTF-8 bytes, free of `/`, `+`, `#` and control, format or separator characters. Templates may only use plain `{name}` placeholders. Anything else raises `ValueError`.
+- Subscriptions with wildcards use `build_subscription(template, wildcards=(...), ...)`, which names the levels that become `+` (each must fill a whole level). A hub subscribes to its own commands with `build_subscription(topics.CMD_GENERIC, wildcards=("domain", "action"), hub_id=<its id>, version=1)`. Only the vault subscribes for every hub, with `hub_id=topics.ANY_HUB`; no string (not even `"+"`) is ever taken as "every hub".
+- Numbers, strings, lists and dicts in the Pydantic models have upper bounds (sequence numbers fit a signed 64-bit integer, see `schemas.MAX_SEQ`); timestamps must be finite and before the year 3000.
 - Payloads are validated with the Pydantic models in `central_core_mqtt_shared.schemas`.
 
 ## MQTT endpoints (topics)
@@ -66,6 +67,22 @@ records keep their own `seq` and `event_ts`). The vault stores history at
 `event_ts`, so a reading resent hours late lands at the time it happened.
 
 All of it is optional: payloads without `seq` validate and are handled as before.
+
+## Validation (v1.2.0)
+
+v1.2.0 checks what goes into topics and payloads. The wire format is unchanged,
+but a consumer moving its pin from v1.1.0 must:
+
+- build every subscription that contains `+` with `build_subscription`, naming
+  the wildcard levels (`build_topic` now refuses `+`). The vault subscribes for
+  every hub with `hub_id=topics.ANY_HUB`; a hub subscribes to its own commands
+  with `wildcards=("domain", "action")`;
+- pass only hub ids that match `topics.HUB_ID_PATTERN` (letters, digits, `.`,
+  `_`, `-`; up to 64 characters; not `broadcast`) and topic levels without
+  `/`, `+`, `#`, control or format characters;
+- expect `ValueError` from `build_topic` / `build_subscription`, and
+  `ValidationError` for out-of-range numbers, oversized strings, lists or
+  dicts, non-finite timestamps and times from the year 3000 on.
 
 ## Helper usage
 ```py
