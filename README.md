@@ -109,12 +109,20 @@ Payloads (`schemas.py`, constants in brackets):
   `message` 4096 (`MAX_ACK_MESSAGE_LENGTH`); firmware `download_url` 2048 and `checksum` 256;
   add-on `version` 64; status words 32 (`MAX_STATUS_LENGTH`); `outbox_id` 1-64;
 - a sensor `state`: at most 4 KB (`MAX_STATE_BYTES`; a string's own UTF-8 bytes, anything else as
-  compact JSON);
-- free-form objects: at most 10,000 keys (`MAX_DICT_KEYS`) and, as compact JSON, 64 KB for one
-  sensor's `attributes` (`MAX_ATTRIBUTES_BYTES`) and 256 KB for any other (`details`, `data`,
-  `config`, `metadata`, `settings`, `state`, a record's `payload`; `MAX_FREE_JSON_BYTES`);
+  compact JSON in UTF-8);
+- free-form objects: at most 10,000 keys (`MAX_DICT_KEYS`) and, as compact JSON in UTF-8 bytes,
+  64 KB for one sensor's `attributes` (`MAX_ATTRIBUTES_BYTES`) and 256 KB for any other (`details`,
+  `data`, `config`, `metadata`, `settings`, `state`, a record's `payload`; `MAX_FREE_JSON_BYTES`);
 - lists: at most 10,000 sensors in one message (`MAX_SENSORS`) and 200 records in one batch
   (`MAX_BATCH_RECORDS`).
+
+How a limit shows depends on the model. Each model refuses a value over its
+own limits with a `ValidationError`, but in `SensorsTelemetry` a sensor is
+`FullSensor` or else `BasicSensor`: a sensor whose `attributes` or `unit` is too
+big is kept as a `BasicSensor` (id, state, type) with those fields dropped,
+rather than failing the message. Its `id`, `type` and `state` limits apply
+either way. Unknown keys are ignored everywhere (pydantic's default), so a newer
+hub's extra fields never fail an older consumer.
 
 Not bounded by the schemas: the total size of a whole message (that is the broker's
 `max_packet_size` and each consumer's own limit), and a command's `payload` (the command models
