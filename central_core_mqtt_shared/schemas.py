@@ -1,8 +1,95 @@
 from __future__ import annotations
+import json
 from datetime import datetime, timezone
-from pydantic import BaseModel, Field, field_validator
-from typing import Optional, Dict, Any, Union, List
+from pydantic import AfterValidator, BaseModel, Field, field_validator
+from typing import Annotated, Optional, Dict, Any, Union, List
 from enum import Enum
+
+
+# ============================================================
+# LIMITS
+#
+# Messages come off the network, so every number and list a schema accepts has
+# an upper bound. The bounds are far above what a real hub sends; they only
+# keep a forged or broken message from reaching a database as a huge number or
+# an enormous list.
+# ============================================================
+
+# Largest sequence number or counter: what a signed 64-bit database column holds.
+MAX_SEQ = 2**63 - 1
+
+# Longest ISO 8601 time string we will try to parse (real ones are about 35).
+MAX_TIME_LENGTH = 64
+
+# Most sensors in one sensors telemetry message.
+MAX_SENSORS = 10_000
+
+# Home Assistant entity ids are at most 255 characters.
+MAX_ENTITY_ID_LENGTH = 255
+
+# Longest command id (the vault issues 22-character url-safe tokens).
+MAX_COMMAND_ID_LENGTH = 128
+
+# Longest free-text message in a command acknowledgement.
+MAX_ACK_MESSAGE_LENGTH = 4096
+
+# Most keys in one free-form dict (attributes, details, config, ...).
+MAX_DICT_KEYS = 10_000
+
+# Epoch-second timestamps must be finite, not negative, and before the year 3000.
+MAX_TIMESTAMP = 32503680000.0  # 3000-01-01T00:00:00Z
+MAX_YEAR = 2999
+
+# System telemetry: percentages, an uptime of at most 100 years, a temperature in degrees C.
+MAX_UPTIME_S = 100 * 365.25 * 24 * 3600
+
+# Largest free-form value, measured as compact JSON in UTF-8 bytes.
+MAX_STATE_BYTES = 4 * 1024  # one sensor state (Home Assistant itself keeps them to 255 characters)
+MAX_ATTRIBUTES_BYTES = 64 * 1024  # one sensor's attributes
+MAX_FREE_JSON_BYTES = 256 * 1024  # any other free-form object (details, config, payload, ...)
+
+# Longest status word in StatusOnline / StatusOffline.
+MAX_STATUS_LENGTH = 32
+
+
+def _json_bytes_at_most(limit: int):
+    """A validator: the value, as compact JSON, is at most `limit` UTF-8 bytes."""
+
+    def check(value: Any) -> Any:
+        if value is None:
+            return value
+        if isinstance(value, str):
+            size = len(value.encode("utf-8", "surrogatepass"))
+        else:
+            try:
+                text = json.dumps(value, default=str, ensure_ascii=False, separators=(",", ":"))
+            except (TypeError, ValueError, RecursionError):
+                raise ValueError("not representable as JSON") from None
+            # UTF-8 bytes, as documented ("surrogatepass" only so a lone surrogate
+            # from a JSON \ud800 escape is measured rather than raising).
+            size = len(text.encode("utf-8", "surrogatepass"))
+        if size > limit:
+            raise ValueError(f"larger than {limit} bytes")
+        return value
+
+    return check
+
+
+Timestamp = Annotated[float, Field(ge=0, lt=MAX_TIMESTAMP, allow_inf_nan=False)]
+"""Seconds since the epoch, finite, from 1970 to before the year 3000."""
+
+FreeDict = Annotated[
+    Dict[str, Any], Field(max_length=MAX_DICT_KEYS), AfterValidator(_json_bytes_at_most(MAX_FREE_JSON_BYTES))
+]
+"""A free-form JSON object: at most MAX_DICT_KEYS keys and MAX_FREE_JSON_BYTES as JSON."""
+
+AttributesDict = Annotated[
+    Dict[str, Any], Field(max_length=MAX_DICT_KEYS), AfterValidator(_json_bytes_at_most(MAX_ATTRIBUTES_BYTES))
+]
+"""One sensor's attributes: at most MAX_DICT_KEYS keys and MAX_ATTRIBUTES_BYTES as JSON."""
+
+SensorState = Annotated[Optional[Any], AfterValidator(_json_bytes_at_most(MAX_STATE_BYTES))]
+"""One sensor state: at most MAX_STATE_BYTES (a string's own bytes, anything else as JSON)."""
 
 
 # ============================================================
@@ -19,6 +106,8 @@ def parse_utc_iso(value: Any) -> datetime:
     if isinstance(value, datetime):
         dt = value
     elif isinstance(value, str) and value.strip():
+        if len(value) > MAX_TIME_LENGTH:
+            raise ValueError("not an ISO 8601 time: too long")
         try:
             dt = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
         except ValueError as exc:
@@ -27,7 +116,13 @@ def parse_utc_iso(value: Any) -> datetime:
         raise ValueError(f"not an ISO 8601 time: {value!r}")
     if dt.tzinfo is None or dt.utcoffset() is None:
         raise ValueError(f"time has no UTC offset: {value!r}")
-    return dt.astimezone(timezone.utc)
+    try:
+        utc = dt.astimezone(timezone.utc)
+    except OverflowError:  # e.g. year 9999 with a negative offset, or year 1 with a positive one
+        raise ValueError(f"time out of range: {value!r}") from None
+    if utc.year > MAX_YEAR:
+        raise ValueError(f"time out of range: {value!r}")
+    return utc
 
 
 def to_utc_iso(value: Any) -> str:
@@ -88,10 +183,10 @@ class OutboxFields(BaseModel):
       the vault knows where the unbroken run it acknowledges starts.
     - `hub_time`: the hub's clock when it sent the message (clock check).
     """
-    seq: Optional[int] = Field(None, ge=1)
+    seq: Optional[int] = Field(None, ge=1, le=MAX_SEQ)
     event_ts: Optional[str] = None
     outbox_id: Optional[str] = Field(None, min_length=1, max_length=64)
-    oldest_seq: Optional[int] = Field(None, ge=1)
+    oldest_seq: Optional[int] = Field(None, ge=1, le=MAX_SEQ)
     hub_time: Optional[str] = None
 
     @field_validator("event_ts", "hub_time", mode="before")
@@ -111,9 +206,9 @@ class BasicSensor(BaseModel):
     - full basic discovery list
     - delta updates
     """
-    id: str
-    state: Optional[Any] = None
-    type: Optional[str] = None
+    id: str = Field(..., max_length=MAX_ENTITY_ID_LENGTH)
+    state: SensorState = None
+    type: Optional[str] = Field(None, max_length=MAX_ENTITY_ID_LENGTH)
 
 
 class FullSensor(BaseModel):
@@ -124,11 +219,11 @@ class FullSensor(BaseModel):
     All fields except `id` have defaults so Basic-shaped payloads
     (`{id, state}` or `{id, state, type}`) validate against FullSensor too.
     """
-    id: str
-    state: Optional[Any] = None
-    type: Optional[str] = None
-    unit: Optional[str] = None
-    attributes: Dict[str, Any] = Field(default_factory=dict)
+    id: str = Field(..., max_length=MAX_ENTITY_ID_LENGTH)
+    state: SensorState = None
+    type: Optional[str] = Field(None, max_length=MAX_ENTITY_ID_LENGTH)
+    unit: Optional[str] = Field(None, max_length=MAX_ENTITY_ID_LENGTH)
+    attributes: AttributesDict = Field(default_factory=dict)
 
 
 class SensorsTelemetry(OutboxFields):
@@ -144,8 +239,8 @@ class SensorsTelemetry(OutboxFields):
     construct BasicSensor instances directly (test suites, legacy code).
     """
     partial: bool
-    timestamp: float
-    sensors: List[Union[FullSensor, BasicSensor]]
+    timestamp: Timestamp
+    sensors: List[Union[FullSensor, BasicSensor]] = Field(..., max_length=MAX_SENSORS)
 
 
 # ============================================================
@@ -153,20 +248,32 @@ class SensorsTelemetry(OutboxFields):
 # ============================================================
 
 class SystemTelemetry(OutboxFields):
-    cpu: float = Field(..., description="CPU usage percentage")
-    ram: float = Field(..., description="RAM usage percentage")
-    uptime: float = Field(..., description="Uptime in seconds")
-    temperature: Optional[float] = Field(None, description="System temperature")
+    cpu: float = Field(..., ge=0, le=100, allow_inf_nan=False, description="CPU usage percentage")
+    ram: float = Field(..., ge=0, le=100, allow_inf_nan=False, description="RAM usage percentage")
+    uptime: float = Field(..., ge=0, le=MAX_UPTIME_S, allow_inf_nan=False, description="Uptime in seconds")
+    temperature: Optional[float] = Field(
+        None, ge=-100, le=250, allow_inf_nan=False, description="System temperature in degrees C"
+    )
+    # Since v1.2.0, optional (None from older hubs): is Home Assistant feeding
+    # the hub? A hub whose Home Assistant websocket is down still sends
+    # heartbeats, but no door or motion changes reach the vault.
+    ha_connected: Optional[bool] = Field(None, description="Home Assistant websocket connected")
+    ha_last_event_at: Optional[str] = Field(None, description="Last event from Home Assistant, UTC ISO 8601")
+
+    @field_validator("ha_last_event_at", mode="before")
+    @classmethod
+    def _ha_last_event_utc(cls, value: Any) -> Optional[str]:
+        return _optional_utc_iso(value)
 
 
 class EventTelemetry(OutboxFields):
     event_type: EventType
-    timestamp: float
-    details: Dict[str, Any] = Field(default_factory=dict)
+    timestamp: Timestamp
+    details: FreeDict = Field(default_factory=dict)
 
 
 class GeneralTelemetry(OutboxFields):
-    data: Dict[str, Any] = Field(default_factory=dict)
+    data: FreeDict = Field(default_factory=dict)
 
 
 # ============================================================
@@ -174,13 +281,13 @@ class GeneralTelemetry(OutboxFields):
 # ============================================================
 
 class StatusOnline(BaseModel):
-    status: str = "online"
-    timestamp: float
+    status: str = Field("online", max_length=MAX_STATUS_LENGTH)
+    timestamp: Timestamp
 
 
 class StatusOffline(BaseModel):
-    status: str = "offline"
-    timestamp: float
+    status: str = Field("offline", max_length=MAX_STATUS_LENGTH)
+    timestamp: Timestamp
 
 
 # ============================================================
@@ -188,25 +295,25 @@ class StatusOffline(BaseModel):
 # ============================================================
 
 class CommandBase(BaseModel):
-    command_id: str
+    command_id: str = Field(..., min_length=1, max_length=MAX_COMMAND_ID_LENGTH)
 
 
 class ConfigUpdateCommand(CommandBase):
-    version: int
-    config: Dict[str, Any]
+    version: int = Field(..., ge=0, le=MAX_SEQ)
+    config: FreeDict
 
 
 class FirmwareUpdateCommand(CommandBase):
-    download_url: str
-    checksum: str
+    download_url: str = Field(..., max_length=2048)
+    checksum: str = Field(..., max_length=256)
 
 
 class TunnelStartCommand(CommandBase):
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+    metadata: FreeDict = Field(default_factory=dict)
 
 
 class TunnelStopCommand(CommandBase):
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+    metadata: FreeDict = Field(default_factory=dict)
 
 
 class SensorsPollCommand(CommandBase):
@@ -214,14 +321,14 @@ class SensorsPollCommand(CommandBase):
     Vault requests full metadata for ONE sensor.
     entity_id must match e.g. sensor.kitchen_temp
     """
-    entity_id: str
+    entity_id: str = Field(..., max_length=MAX_ENTITY_ID_LENGTH)
 
 
 class SensorsSetCommand(CommandBase):
     """
     Push sensor configuration updates.
     """
-    settings: Dict[str, Any] = Field(default_factory=dict)
+    settings: FreeDict = Field(default_factory=dict)
 
 
 # ============================================================
@@ -229,19 +336,19 @@ class SensorsSetCommand(CommandBase):
 # ============================================================
 
 class HAAddonTelemetry(OutboxFields):
-    state: Dict[str, Any] = Field(default_factory=dict)
-    timestamp: float
+    state: FreeDict = Field(default_factory=dict)
+    timestamp: Timestamp
 
 
 class HAAddonStatus(BaseModel):
     online: bool
-    version: str
-    timestamp: float
+    version: str = Field(..., max_length=64)
+    timestamp: Timestamp
 
 
 class HAAddonCommand(CommandBase):
-    action: str
-    data: Dict[str, Any] = Field(default_factory=dict)
+    action: str = Field(..., max_length=MAX_COMMAND_ID_LENGTH)
+    data: FreeDict = Field(default_factory=dict)
 
 
 # ============================================================
@@ -249,10 +356,10 @@ class HAAddonCommand(CommandBase):
 # ============================================================
 
 class CommandAck(BaseModel):
-    command_id: str
+    command_id: str = Field(..., min_length=1, max_length=MAX_COMMAND_ID_LENGTH)
     status: AckStatus
-    message: Optional[str] = None
-    timestamp: float
+    message: Optional[str] = Field(None, max_length=MAX_ACK_MESSAGE_LENGTH)
+    timestamp: Timestamp
 
 
 # ============================================================
@@ -275,11 +382,11 @@ class OutboxRecord(BaseModel):
     `queued_at` is when the hub stored the reading, which is not when it
     happened (`event_ts`).
     """
-    seq: int = Field(..., ge=1)
+    seq: int = Field(..., ge=1, le=MAX_SEQ)
     type: str
     event_ts: str
     queued_at: Optional[str] = None
-    payload: Dict[str, Any] = Field(default_factory=dict)
+    payload: FreeDict = Field(default_factory=dict)
 
     @field_validator("type")
     @classmethod
@@ -307,7 +414,7 @@ class TelemetryBatch(BaseModel):
     """
     hub_time: str
     outbox_id: Optional[str] = Field(None, min_length=1, max_length=64)
-    oldest_seq: Optional[int] = Field(None, ge=1)
+    oldest_seq: Optional[int] = Field(None, ge=1, le=MAX_SEQ)
     records: List[OutboxRecord] = Field(..., min_length=1, max_length=MAX_BATCH_RECORDS)
 
     @field_validator("hub_time", mode="before")
@@ -325,8 +432,8 @@ class StoreAck(BaseModel):
     acknowledgement, for logs. `outbox_id`, when given, names the outbox the
     acknowledgement is for: a hub ignores an acknowledgement for another one.
     """
-    upto: int = Field(..., ge=0)
-    stored: int = Field(0, ge=0)
+    upto: int = Field(..., ge=0, le=MAX_SEQ)
+    stored: int = Field(0, ge=0, le=MAX_SEQ)
     outbox_id: Optional[str] = Field(None, min_length=1, max_length=64)
 
 

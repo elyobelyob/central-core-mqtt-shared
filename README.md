@@ -15,7 +15,9 @@ Central Core helps families look after someone living with dementia at home. Dem
 
 ## Protocol basics
 - All hub-scoped topics are versioned: `hubs/{hub_id}/v{version}/...`.
-- Use `central_core_mqtt_shared.topics.build_topic()` to render concrete topics.
+- Use `central_core_mqtt_shared.topics.build_topic()` to render concrete topics. It checks every value: a hub id must match `topics.HUB_ID_PATTERN`; any other level must be a non-empty string or integer of at most 128 UTF-8 bytes, free of `/`, `+`, `#` and control, format or separator characters. Templates may only use plain `{name}` placeholders. Anything else raises `ValueError`.
+- Subscriptions with wildcards use `build_subscription(template, wildcards=(...), ...)`, which names the levels that become `+` (each must fill a whole level). A hub subscribes to its own commands with `build_subscription(topics.CMD_GENERIC, wildcards=("domain", "action"), hub_id=<its id>, version=1)`. Only the vault subscribes for every hub, with `hub_id=topics.ANY_HUB`; no string (not even `"+"`) is ever taken as "every hub".
+- The Pydantic models bound what arrives off the network; see "What is bounded" below for the exact list.
 - Payloads are validated with the Pydantic models in `central_core_mqtt_shared.schemas`.
 
 ## MQTT endpoints (topics)
@@ -65,6 +67,66 @@ records keep their own `seq` and `event_ts`). The vault stores history at
 `event_ts`, so a reading resent hours late lands at the time it happened.
 
 All of it is optional: payloads without `seq` validate and are handled as before.
+
+## Validation (v1.2.0)
+
+v1.2.0 checks what goes into topics and payloads. The wire format is unchanged,
+but a consumer moving its pin from v1.1.0 must:
+
+- build every subscription that contains `+` with `build_subscription`, naming
+  the wildcard levels (`build_topic` now refuses `+`). The vault subscribes for
+  every hub with `hub_id=topics.ANY_HUB`; a hub subscribes to its own commands
+  with `wildcards=("domain", "action")`;
+- pass only hub ids that match `topics.HUB_ID_PATTERN` (letters, digits, `.`,
+  `_`, `-`; up to 64 characters; not `broadcast`) and topic levels without
+  `/`, `+`, `#`, control or format characters;
+- expect `ValueError` from `build_topic` / `build_subscription`, and
+  `ValidationError` for values outside the bounds below.
+
+`SystemTelemetry` also gains two optional fields, `ha_connected` and
+`ha_last_event_at` (None from older hubs): whether Home Assistant is feeding
+the hub, and when it last sent an event.
+
+### What is bounded (v1.2.0)
+
+Topics (`topics.py`):
+
+- hub level: an exact `str` matching `HUB_ID_PATTERN` (1-64 characters), not `broadcast`;
+- every other level: a non-empty `str` or `int`, at most 128 UTF-8 bytes, without `/`, `+`, `#` or
+  Unicode control, format, surrogate, separator or unassigned characters;
+- templates: plain `{name}` placeholders only, and no `+` or `#` in their own text.
+
+Payloads (`schemas.py`, constants in brackets):
+
+- sequence numbers and counters (`seq`, `oldest_seq`, `upto`, `stored`, a config `version`): 0 or 1 up to
+  2^63-1 (`MAX_SEQ`);
+- epoch timestamps: finite, from 0 to before the year 3000 (`MAX_TIMESTAMP`); ISO 8601 times: at most
+  64 characters (`MAX_TIME_LENGTH`), with a UTC offset, before the year 3000;
+- `SystemTelemetry`: `cpu` and `ram` 0-100, `uptime` 0-100 years (`MAX_UPTIME_S`), `temperature`
+  -100 to 250, all finite;
+- strings: sensor `id`, `type`, `unit` and a poll's `entity_id` at most 255 characters
+  (`MAX_ENTITY_ID_LENGTH`); command ids and add-on actions 1-128 (`MAX_COMMAND_ID_LENGTH`); ack
+  `message` 4096 (`MAX_ACK_MESSAGE_LENGTH`); firmware `download_url` 2048 and `checksum` 256;
+  add-on `version` 64; status words 32 (`MAX_STATUS_LENGTH`); `outbox_id` 1-64;
+- a sensor `state`: at most 4 KB (`MAX_STATE_BYTES`; a string's own UTF-8 bytes, anything else as
+  compact JSON in UTF-8);
+- free-form objects: at most 10,000 keys (`MAX_DICT_KEYS`) and, as compact JSON in UTF-8 bytes,
+  64 KB for one sensor's `attributes` (`MAX_ATTRIBUTES_BYTES`) and 256 KB for any other (`details`,
+  `data`, `config`, `metadata`, `settings`, `state`, a record's `payload`; `MAX_FREE_JSON_BYTES`);
+- lists: at most 10,000 sensors in one message (`MAX_SENSORS`) and 200 records in one batch
+  (`MAX_BATCH_RECORDS`).
+
+How a limit shows depends on the model. Each model refuses a value over its
+own limits with a `ValidationError`, but in `SensorsTelemetry` a sensor is
+`FullSensor` or else `BasicSensor`: a sensor whose `attributes` or `unit` is too
+big is kept as a `BasicSensor` (id, state, type) with those fields dropped,
+rather than failing the message. Its `id`, `type` and `state` limits apply
+either way. Unknown keys are ignored everywhere (pydantic's default), so a newer
+hub's extra fields never fail an older consumer.
+
+Not bounded by the schemas: the total size of a whole message (that is the broker's
+`max_packet_size` and each consumer's own limit), and a command's `payload` (the command models
+do not describe it).
 
 ## Helper usage
 ```py
