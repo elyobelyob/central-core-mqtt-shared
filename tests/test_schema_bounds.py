@@ -246,7 +246,7 @@ def test_system_readings_out_of_range_are_refused(field, bad):
 def test_free_form_dicts_are_capped():
     big = {f"k{i}": i for i in range(MAX_DICT_KEYS + 1)}
     ok = {f"k{i}": i for i in range(MAX_DICT_KEYS)}
-    assert len(FullSensor(id="sensor.a", attributes=ok).attributes) == MAX_DICT_KEYS
+    assert len(GeneralTelemetry(data=ok).data) == MAX_DICT_KEYS
     for make in (
         lambda d: FullSensor(id="sensor.a", attributes=d),
         lambda d: EventTelemetry(event_type="door", timestamp=1.0, details=d),
@@ -259,3 +259,86 @@ def test_free_form_dicts_are_capped():
     ):
         with pytest.raises(ValidationError):
             make(big)
+
+
+# ------------------------------------------------------------
+# Sizes of free-form values, status words, Home Assistant state (v1.2.0)
+# ------------------------------------------------------------
+
+from central_core_mqtt_shared.schemas import (  # noqa: E402
+    MAX_ATTRIBUTES_BYTES,
+    MAX_FREE_JSON_BYTES,
+    MAX_STATE_BYTES,
+    MAX_STATUS_LENGTH,
+)
+
+
+def test_a_sensor_state_is_capped():
+    assert BasicSensor(id="sensor.a", state="x" * MAX_STATE_BYTES).state
+    assert FullSensor(id="sensor.a", state=None).state is None
+    assert BasicSensor(id="sensor.a", state=21.5).state == 21.5
+    for model in (BasicSensor, FullSensor):
+        with pytest.raises(ValidationError):
+            model(id="sensor.a", state="x" * (MAX_STATE_BYTES + 1))
+        with pytest.raises(ValidationError):
+            model(id="sensor.a", state="\u00e9" * (MAX_STATE_BYTES // 2 + 1))  # bytes, not characters
+        with pytest.raises(ValidationError):
+            model(id="sensor.a", state={"nested": ["y" * MAX_STATE_BYTES]})
+
+
+def test_sensor_attributes_are_capped_in_bytes():
+    FullSensor(id="sensor.a", attributes={"friendly_name": "x" * (MAX_ATTRIBUTES_BYTES - 100)})
+    with pytest.raises(ValidationError):
+        FullSensor(id="sensor.a", attributes={"friendly_name": "x" * MAX_ATTRIBUTES_BYTES})
+    with pytest.raises(ValidationError):
+        FullSensor(id="sensor.a", attributes={"a": [{"b": "x" * MAX_ATTRIBUTES_BYTES}]})
+
+
+def test_other_free_form_values_are_capped_in_bytes():
+    GeneralTelemetry(data={"x": "y" * (MAX_FREE_JSON_BYTES - 100)})
+    with pytest.raises(ValidationError):
+        GeneralTelemetry(data={"x": ["y" * MAX_FREE_JSON_BYTES]})
+    with pytest.raises(ValidationError):
+        OutboxRecord(seq=1, type="system", event_ts=TS, payload={"x": {"y": "z" * MAX_FREE_JSON_BYTES}})
+
+
+def test_values_that_are_not_json_are_refused():
+    loop = {}
+    loop["self"] = loop
+    with pytest.raises(ValidationError, match="JSON"):
+        GeneralTelemetry(data=loop)
+    # other Python objects are measured by their text
+    assert GeneralTelemetry(data={"when": datetime_now()}).data
+
+
+def datetime_now():
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc)
+
+
+def test_status_words_are_short():
+    assert StatusOnline(timestamp=1.0).status == "online"
+    with pytest.raises(ValidationError):
+        StatusOnline(status="x" * (MAX_STATUS_LENGTH + 1), timestamp=1.0)
+    with pytest.raises(ValidationError):
+        StatusOffline(status="x" * (MAX_STATUS_LENGTH + 1), timestamp=1.0)
+
+
+def test_home_assistant_state_is_optional_and_checked():
+    old = SystemTelemetry(**GOOD_SYSTEM)  # from a hub before v1.2.0
+    assert old.ha_connected is None and old.ha_last_event_at is None
+    new = SystemTelemetry(**GOOD_SYSTEM, ha_connected=False, ha_last_event_at="2026-10-11T08:00:00+01:00")
+    assert new.ha_connected is False
+    assert new.ha_last_event_at == "2026-10-11T07:00:00Z"
+    for bad in ("yesterday", "2026-10-11T08:00:00", "3000-01-01T00:00:00Z"):
+        with pytest.raises(ValidationError):
+            SystemTelemetry(**GOOD_SYSTEM, ha_last_event_at=bad)
+    with pytest.raises(ValidationError):
+        SystemTelemetry(**GOOD_SYSTEM, ha_connected="maybe")
+
+
+def test_extra_keys_are_still_ignored():
+    """Hubs add fields before the vault's schema knows them (as v1.2.0 hubs do
+    for a v1.1.0 vault): unknown keys must never fail validation."""
+    assert SystemTelemetry(**GOOD_SYSTEM, something_new=1).cpu == 12.5

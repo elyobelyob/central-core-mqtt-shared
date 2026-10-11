@@ -340,3 +340,113 @@ class TestBuildSubscription:
             build_topic(TELEMETRY_SYSTEM, hub_id="+", version=1)
         with pytest.raises(ValueError):
             build_topic(CMD_GENERIC, hub_id="h", version=1, domain="+", action="+")
+
+
+# ------------------------------------------------------------
+# Hardening (second review)
+# ------------------------------------------------------------
+
+
+@pytest.mark.parametrize("ch", ["￾", "￿", "﷐", "﷯", "\U0010ffff", "͸"])
+def test_non_characters_and_unassigned_code_points_are_refused(ch):
+    with pytest.raises(ValueError):
+        build_topic(BROADCAST_CMD, version=1, command=f"a{ch}b")
+
+
+@pytest.mark.parametrize("template", ["hubs/{hub_id}/+/x", "hubs/{hub_id}/#", "hubs/{hub_id}/a+b", "x#/{hub_id}"])
+def test_template_text_may_not_contain_wildcards(template):
+    with pytest.raises(ValueError, match="may not contain"):
+        build_topic(template, hub_id="h")
+    with pytest.raises(ValueError, match="may not contain"):
+        build_subscription(template, hub_id=ANY_HUB)
+
+
+def test_the_hub_level_is_found_by_position_not_by_name():
+    tpl = "hubs/{hid}/v1/cmd/{domain}/{action}"
+    assert build_subscription(tpl, wildcards=("domain", "action"), hid="demo-home-001") == (
+        "hubs/demo-home-001/v1/cmd/+/+"
+    )
+    assert build_subscription(tpl, wildcards=("domain", "action"), hid=ANY_HUB) == "hubs/+/v1/cmd/+/+"
+    for bad in ("+", "a/b", "broadcast"):
+        with pytest.raises(ValueError):
+            build_topic(tpl, hid=bad, domain="d", action="a")
+    with pytest.raises(ValueError, match="ANY_HUB"):
+        build_subscription(tpl, wildcards=("hid", "domain", "action"))
+
+
+def test_any_hub_only_fills_the_hub_level():
+    with pytest.raises(ValueError, match="only for the hub level"):
+        build_subscription(CMD_GENERIC, wildcards=("action",), hub_id="h", version=1, domain=ANY_HUB)
+    with pytest.raises(ValueError, match="only for the hub level"):
+        build_subscription("x/{hub_id}/y", hub_id=ANY_HUB)  # named hub_id, but not in the hub position
+
+
+def test_a_hub_id_placeholder_anywhere_is_checked_as_a_hub_id():
+    with pytest.raises(ValueError, match="invalid hub id"):
+        build_topic("x/{hub_id}/y", hub_id="café")
+    assert build_topic("x/{hub_id}/y", hub_id="demo-home-001") == "x/demo-home-001/y"
+
+
+def test_every_occurrence_of_a_wildcard_must_fill_a_whole_level():
+    assert build_subscription("{a}/x/{a}", wildcards=("a",)) == "+/x/+"
+    with pytest.raises(ValueError, match="whole"):
+        build_subscription("{a}/x/v{a}", wildcards=("a",))
+    with pytest.raises(ValueError, match="whole"):
+        build_subscription("v{a}/x/{a}", wildcards=("a",))
+
+
+@pytest.mark.parametrize("wildcards", [None, "domain", b"domain", ("domain", 1), [None]])
+def test_wildcards_must_be_names(wildcards):
+    with pytest.raises(ValueError, match="sequence of level names"):
+        build_subscription(CMD_GENERIC, wildcards=wildcards, hub_id="h", version=1, action="a", domain="d")
+
+
+def test_a_wildcard_value_must_be_a_plain_plus():
+    class Plus(str):
+        def __eq__(self, other):
+            return True
+
+        __hash__ = str.__hash__
+
+    with pytest.raises(ValueError, match="wildcard level"):
+        build_subscription(CMD_GENERIC, wildcards=("domain", "action"), hub_id="h", version=1, domain=Plus("x"))
+
+
+def test_a_str_subclass_cannot_change_what_was_checked():
+    class Sneaky(str):
+        def __str__(self):
+            return "+"
+
+        def __format__(self, spec):
+            return "#"
+
+    # a hub id must be an exact str
+    assert not is_valid_hub_id(Sneaky("demo-home-001"))
+    with pytest.raises(ValueError):
+        build_topic(TELEMETRY_SYSTEM, hub_id=Sneaky("demo-home-001"), version=1)
+    # other levels use the characters themselves, never the subclass's rendering
+    assert build_topic(BROADCAST_CMD, version=1, command=Sneaky("restart")) == "hubs/broadcast/v1/cmd/restart"
+
+
+def test_an_int_subclass_renders_as_its_value():
+    class Odd(int):
+        def __str__(self):
+            return "+"
+
+        def __repr__(self):
+            return "#"
+
+        def __format__(self, spec):
+            return "/"
+
+    assert build_topic(TELEMETRY_SYSTEM, hub_id="h", version=Odd(1)) == "hubs/h/v1/telemetry/system"
+
+
+def test_any_hub_is_a_singleton_through_copy_and_pickle():
+    import copy
+    import pickle
+
+    assert copy.copy(ANY_HUB) is ANY_HUB
+    assert copy.deepcopy(ANY_HUB) is ANY_HUB
+    assert copy.deepcopy({"hub_id": ANY_HUB})["hub_id"] is ANY_HUB
+    assert pickle.loads(pickle.dumps(ANY_HUB)) is ANY_HUB

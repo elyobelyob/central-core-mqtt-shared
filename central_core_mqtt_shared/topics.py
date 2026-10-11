@@ -188,51 +188,69 @@ MAX_SEGMENT_LENGTH = 128
 _TOPIC_SEPARATORS = frozenset("/+#")
 # Unicode categories never allowed in a level: control (C0, DEL, C1), format
 # (zero-width, bidirectional overrides such as U+200B and U+202E), surrogates,
-# and separators (spaces, line and paragraph separators).
-_BAD_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Zs", "Zl", "Zp"})
+# separators (spaces, line and paragraph separators), and unassigned code
+# points including the non-characters U+FDD0-FDEF and U+xFFFE/xFFFF (a broker
+# such as mosquitto disconnects a client that sends them).
+_BAD_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Zs", "Zl", "Zp", "Cn"})
 
 SINGLE_LEVEL_WILDCARD = "+"
 
 
 class _AnyHub:
-    """Marker for "every hub" in `build_subscription` (renders as `+`)."""
+    """Marker for "every hub" in `build_subscription` (renders as `+`).
+
+    There is exactly one: copying or pickling it gives the same object back."""
 
     __slots__ = ()
 
     def __repr__(self):
         return "ANY_HUB"
 
+    def __reduce__(self):
+        return "ANY_HUB"  # pickled as a reference to this module's ANY_HUB
+
+    def __copy__(self):
+        return self
+
+    def __deepcopy__(self, memo):
+        return self
+
 
 ANY_HUB = _AnyHub()
-"""Pass `hub_id=ANY_HUB` to `build_subscription` to subscribe for every hub
-(the vault). No string, not even "+", is ever taken as "every hub"."""
+"""Pass it as the hub level's value (`hub_id=ANY_HUB`) to `build_subscription`
+to subscribe for every hub (the vault). No string, not even "+", is ever taken
+as "every hub"."""
 
 
 def is_valid_hub_id(hub_id: object) -> bool:
-    """True when `hub_id` is safe to use as the hub level of a topic."""
+    """True when `hub_id` is a plain `str` that is safe as the hub level of a topic."""
     return (
-        isinstance(hub_id, str)
+        type(hub_id) is str
         and _HUB_ID_RE.fullmatch(hub_id) is not None
         and hub_id not in RESERVED_HUB_IDS
     )
 
 
 def validate_hub_id(hub_id: object) -> str:
-    """Return `hub_id` unchanged, or raise ValueError if it is not a valid hub id."""
+    """Return `hub_id` unchanged, or raise ValueError if it is not a valid hub id.
+
+    Only an exact `str` is accepted: a subclass could render differently from
+    what was checked."""
     if not is_valid_hub_id(hub_id):
         raise ValueError(f"invalid hub id: {hub_id!r}")
-    return str(hub_id)
+    return hub_id  # type: ignore[return-value]
 
 
 def _segment(name: str, value: object) -> str:
-    """One concrete topic level, checked. Raises ValueError for anything that
-    could change the shape of the topic or hide in it."""
-    if name == "hub_id":
-        # Strings only: an integer database key is not a hub id.
-        return validate_hub_id(value)
-    if value is None or isinstance(value, (bytes, bytearray, bool)) or not isinstance(value, (str, int)):
+    """One concrete topic level, checked, as the exact text that will be used.
+    Raises ValueError for anything that could change the shape of the topic or
+    hide in it."""
+    if isinstance(value, str):
+        text = str.__str__(value)  # the characters themselves, whatever a subclass overrides
+    elif isinstance(value, int) and not isinstance(value, bool):
+        text = int.__repr__(value)
+    else:
         raise ValueError(f"topic field {name!r} must be a string or integer, not {type(value).__name__}")
-    text = str(value)
     if not text:
         raise ValueError(f"topic field {name!r} is empty")
     for ch in text:
@@ -244,55 +262,74 @@ def _segment(name: str, value: object) -> str:
     return text
 
 
-def _template_fields(template: str) -> list:
-    """(literal_before, name) for each placeholder; refuses anything but plain `{name}`."""
-    if not isinstance(template, str):
+def _template_levels(template: object) -> list:
+    """The template split into topic levels, each a list of (literal, name)
+    pieces. Refuses anything but plain `{name}` placeholders, and any `+` or `#`
+    in the template's own text (wildcards come only from wildcard levels)."""
+    if type(template) is not str:
         raise ValueError("topic template must be a string")
-    fields = []
-    try:
-        parsed = list(string.Formatter().parse(template))
-    except ValueError as exc:
-        raise ValueError(f"malformed topic template: {exc}") from None
-    for literal, name, spec, conversion in parsed:
-        if name is None:
-            continue
-        if not name.isidentifier():
-            raise ValueError(f"topic template field {name!r} must be a plain name")
-        if spec or conversion:
-            raise ValueError(f"topic template field {name!r} may not have a format spec or conversion")
-        fields.append((literal, name))
-    return fields
+    levels = []
+    for level in template.split("/"):
+        try:
+            parsed = list(string.Formatter().parse(level))
+        except ValueError as exc:
+            raise ValueError(f"malformed topic template: {exc}") from None
+        pieces = []
+        for literal, name, spec, conversion in parsed:
+            if "+" in literal or "#" in literal:
+                raise ValueError("topic template text may not contain '+' or '#'")
+            if name is None:
+                pieces.append((literal, None))
+                continue
+            if not name.isidentifier():
+                raise ValueError(f"topic template field {name!r} must be a plain name")
+            if spec or conversion:
+                raise ValueError(f"topic template field {name!r} may not have a format spec or conversion")
+            pieces.append((literal, name))
+        levels.append(pieces)
+    return levels
 
 
-def _whole_level_fields(template: str) -> set:
-    """Names of placeholders that fill an entire topic level (`.../{name}/...`)."""
-    return {
-        name
-        for _literal, name in _template_fields(template)
-        if re.search(r"(?:^|/)\{" + re.escape(name) + r"\}(?:/|$)", template)
-    }
+def _hub_level_name(levels: list) -> object:
+    """The placeholder that is the hub level (`hubs/{name}/...`), whatever it is called."""
+    if len(levels) >= 2 and levels[0] == [("hubs", None)] and len(levels[1]) == 1 and levels[1][0][0] == "":
+        return levels[1][0][1]
+    return None
 
 
-def _render(template: str, fields: dict, wildcards: frozenset) -> str:
-    names = {name for _literal, name in _template_fields(template)}
+def _render(template: str, fields: dict, wildcards: frozenset, allow_any_hub: bool) -> str:
+    levels = _template_levels(template)
+    names = {name for level in levels for _literal, name in level if name}
+    hub_level = _hub_level_name(levels)
+    hub_names = {"hub_id"} & names
+    if hub_level is not None:
+        hub_names.add(hub_level)
     unknown = wildcards - names
     if unknown:
         raise ValueError(f"wildcard levels not in the template: {sorted(unknown)}")
-    if wildcards:
-        partial = wildcards - _whole_level_fields(template)
-        if partial:
-            raise ValueError(f"a wildcard must fill a whole topic level: {sorted(partial)}")
+    if wildcards & hub_names:
+        raise ValueError("subscribe for every hub with ANY_HUB as the hub level's value, not a wildcard")
+    for name in wildcards:
+        for level in levels:
+            if any(n == name for _literal, n in level) and level != [("", name)]:
+                raise ValueError(f"a wildcard must fill a whole topic level: {name!r}")
     safe = {}
     for name in names:
         if name in wildcards:
             value = fields.get(name, SINGLE_LEVEL_WILDCARD)
-            if value != SINGLE_LEVEL_WILDCARD:
+            if type(value) is not str or value != SINGLE_LEVEL_WILDCARD:
                 raise ValueError(f"topic field {name!r} is a wildcard level; leave it out or pass '+'")
             safe[name] = SINGLE_LEVEL_WILDCARD
         elif name not in fields:
             raise KeyError(name)
-        elif name == "hub_id" and fields[name] is ANY_HUB:
-            raise ValueError("ANY_HUB is only for build_subscription")
+        elif fields[name] is ANY_HUB:
+            if not allow_any_hub:
+                raise ValueError("ANY_HUB is only for build_subscription")
+            if name != hub_level:
+                raise ValueError(f"ANY_HUB is only for the hub level, not {name!r}")
+            safe[name] = SINGLE_LEVEL_WILDCARD
+        elif name in hub_names:
+            safe[name] = validate_hub_id(fields[name])
         else:
             safe[name] = _segment(name, fields[name])
     return template.format(**safe)
@@ -302,13 +339,16 @@ def build_topic(template: str, **kwargs) -> str:
     """
     Render a topic template with the required placeholders.
 
-    Every placeholder value is checked: a `hub_id` must match `HUB_ID_PATTERN`
-    (and not be reserved); any other value must be a non-empty string or
-    integer of at most MAX_SEGMENT_LENGTH UTF-8 bytes, free of `/`, `+`, `#`,
-    control, format and separator characters. The template may only use plain
-    `{name}` placeholders. A bad value or template raises ValueError, so a
-    stray wildcard can never widen a publish or a subscription. A missing
-    placeholder raises KeyError; extra keyword arguments are ignored.
+    Every placeholder value is checked. The hub level (`hubs/{hub_id}/...`, or
+    any placeholder named `hub_id`) must be an exact `str` matching
+    `HUB_ID_PATTERN` and not reserved. Any other value must be a non-empty
+    string or integer of at most MAX_SEGMENT_LENGTH UTF-8 bytes, free of `/`,
+    `+`, `#` and of control, format, separator, surrogate and unassigned
+    characters. The template may only use plain `{name}` placeholders and
+    may not contain `+` or `#` itself. A bad value or template raises
+    ValueError, so a stray wildcard can never widen a publish or a
+    subscription. A missing placeholder raises KeyError; extra keyword
+    arguments are ignored.
 
     For a subscription with wildcard levels, use `build_subscription`.
 
@@ -316,7 +356,7 @@ def build_topic(template: str, **kwargs) -> str:
         build_topic(TELEMETRY_SYSTEM, hub_id="hub123", version=1)
     ->  "hubs/hub123/v1/telemetry/system"
     """
-    return _render(template, kwargs, frozenset())
+    return _render(template, kwargs, frozenset(), allow_any_hub=False)
 
 
 def build_subscription(template: str, wildcards=(), **kwargs) -> str:
@@ -324,11 +364,12 @@ def build_subscription(template: str, wildcards=(), **kwargs) -> str:
     Render a subscription topic: like `build_topic`, but the levels named in
     `wildcards` become the single-level wildcard `+`.
 
-    Each wildcard level must fill a whole level of the template (`v{version}`
-    cannot be one) and is either left out or given as "+". Every other level
-    is checked exactly as in `build_topic`, so a value of "+" there is an
-    error. The hub level is never named in `wildcards`: subscribe for every
-    hub with `hub_id=ANY_HUB` (the vault). The multi-level `#` is never produced.
+    Every occurrence of a wildcard level must fill a whole level of the
+    template (`v{version}` cannot be one), and its value is either left out or
+    "+". Every other level is checked exactly as in `build_topic`, so "+"
+    there is an error. The hub level is never named in `wildcards`: subscribe
+    for every hub by passing ANY_HUB as its value (`hub_id=ANY_HUB`, the vault).
+    The multi-level `#` is never produced.
 
     Examples:
         # a hub, its own commands:
@@ -338,16 +379,12 @@ def build_subscription(template: str, wildcards=(), **kwargs) -> str:
         build_subscription(ACK_GENERIC, wildcards=("command_name", "command_id"), hub_id=ANY_HUB, version=1)
     ->  "hubs/+/v1/ack/+/+"
     """
-    if isinstance(wildcards, str):
-        raise ValueError("wildcards must be a sequence of level names, not a string")
+    if wildcards is None or isinstance(wildcards, (str, bytes)):
+        raise ValueError("wildcards must be a sequence of level names")
     wild = frozenset(wildcards)
-    if "hub_id" in wild:
-        raise ValueError("subscribe for every hub with hub_id=ANY_HUB, not a hub_id wildcard")
-    fields = dict(kwargs)
-    if fields.get("hub_id") is ANY_HUB:
-        fields.pop("hub_id")
-        return _render(template, fields, wild | {"hub_id"})
-    return _render(template, fields, wild)
+    if not all(type(name) is str for name in wild):
+        raise ValueError("wildcards must be a sequence of level names")
+    return _render(template, kwargs, wild, allow_any_hub=True)
 
 
 # ============================================================
