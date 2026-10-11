@@ -342,3 +342,30 @@ def test_extra_keys_are_still_ignored():
     """Hubs add fields before the vault's schema knows them (as v1.2.0 hubs do
     for a v1.1.0 vault): unknown keys must never fail validation."""
     assert SystemTelemetry(**GOOD_SYSTEM, something_new=1).cpu == 12.5
+
+
+def test_free_form_sizes_are_utf8_bytes_not_escaped_ascii():
+    # 30,000 two-byte characters: 60 KB as UTF-8, but 180 KB as \\u00e9 escapes
+    attrs = {"name": "\u00e9" * 30_000}
+    assert FullSensor(id="sensor.a", attributes=attrs).attributes == attrs
+    with pytest.raises(ValidationError):
+        FullSensor(id="sensor.a", attributes={"name": "\u00e9" * 33_000})  # 66 KB as UTF-8
+
+
+def test_a_lone_surrogate_is_measured_not_an_error():
+    assert GeneralTelemetry(data={"x": "\ud800"}).data == {"x": "\ud800"}
+    assert BasicSensor(id="sensor.a", state="\ud800").state == "\ud800"
+
+
+def test_oversized_attributes_or_unit_fall_back_to_a_basic_sensor():
+    """In SensorsTelemetry a sensor that is too big as a FullSensor is kept as a
+    BasicSensor (id, state, type): its attributes or unit are dropped, the
+    message is not refused. A state over the cap fails either way."""
+    t = SensorsTelemetry(partial=False, timestamp=1.0, sensors=[
+        {"id": "sensor.a", "state": "1", "attributes": {"x": "y" * (MAX_ATTRIBUTES_BYTES + 1)}},
+        {"id": "sensor.b", "state": "2", "unit": "u" * (MAX_ENTITY_ID_LENGTH + 1)},
+        {"id": "sensor.c", "state": "3", "unit": "C", "attributes": {"k": 1}},
+    ])
+    assert [type(s).__name__ for s in t.sensors] == ["BasicSensor", "BasicSensor", "FullSensor"]
+    with pytest.raises(ValidationError):
+        SensorsTelemetry(partial=False, timestamp=1.0, sensors=[{"id": "sensor.d", "state": "x" * (MAX_STATE_BYTES + 1)}])

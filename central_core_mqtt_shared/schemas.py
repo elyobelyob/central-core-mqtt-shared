@@ -62,9 +62,12 @@ def _json_bytes_at_most(limit: int):
             size = len(value.encode("utf-8", "surrogatepass"))
         else:
             try:
-                size = len(json.dumps(value, default=str, separators=(",", ":")).encode("utf-8", "surrogatepass"))
+                text = json.dumps(value, default=str, ensure_ascii=False, separators=(",", ":"))
             except (TypeError, ValueError, RecursionError):
                 raise ValueError("not representable as JSON") from None
+            # UTF-8 bytes, as documented ("surrogatepass" only so a lone surrogate
+            # from a JSON \ud800 escape is measured rather than raising).
+            size = len(text.encode("utf-8", "surrogatepass"))
         if size > limit:
             raise ValueError(f"larger than {limit} bytes")
         return value
