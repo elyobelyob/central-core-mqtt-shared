@@ -267,6 +267,12 @@ class SystemTelemetry(OutboxFields):
         None, description="Last message of any kind from Home Assistant, UTC ISO 8601"
     )
 
+    # Since v1.4.0, optional (None from older hubs, or when Home Assistant is not
+    # set up): True only while the websocket is logged in AND the state-change
+    # subscription is accepted and live. A fresh ha_last_message_at alone only
+    # shows the connection is alive; a refused subscription still answers pings.
+    ha_streaming: Optional[bool] = Field(None, description="Home Assistant state-change subscription is live")
+
     @field_validator("ha_last_event_at", "ha_last_message_at", mode="before")
     @classmethod
     def _ha_times_utc(cls, value: Any) -> Optional[str]:

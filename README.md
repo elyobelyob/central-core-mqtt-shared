@@ -94,6 +94,11 @@ when anything last came back over the Home Assistant websocket, a ping reply
 included. `ha_last_event_at` only moves when a watched sensor changes; this one
 keeps moving in a quiet house, so "connected but quiet" differs from "feed dead".
 
+v1.4.0 adds `ha_streaming` (bool, None from older hubs or when Home Assistant is
+not set up): true only while the websocket is logged in and the state-change
+subscription is accepted and live. Ping replies keep `ha_last_message_at` fresh
+even if the subscription was refused, so read `ha_streaming` for "changes can arrive".
+
 ### What is bounded (v1.2.0)
 
 Topics (`topics.py`):
