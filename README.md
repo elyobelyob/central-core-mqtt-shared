@@ -83,7 +83,7 @@ but a consumer moving its pin from v1.1.0 must:
 - expect `ValueError` from `build_topic` / `build_subscription`, and
   `ValidationError` for values outside the bounds below.
 
-### Home Assistant liveness (v1.2.0, v1.3.0)
+### Home Assistant liveness (v1.2.0 to v1.4.0)
 
 `SystemTelemetry` also gains two optional fields, `ha_connected` and
 `ha_last_event_at` (None from older hubs): whether Home Assistant is feeding

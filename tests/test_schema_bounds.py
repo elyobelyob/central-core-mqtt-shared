@@ -383,6 +383,7 @@ def test_home_assistant_last_message_is_optional_and_checked():
 
 def test_home_assistant_streaming_is_optional_and_boolean():
     assert SystemTelemetry(**GOOD_SYSTEM).ha_streaming is None  # older hub
+    assert SystemTelemetry(**GOOD_SYSTEM, ha_streaming=None).ha_streaming is None
     assert SystemTelemetry(**GOOD_SYSTEM, ha_streaming=True).ha_streaming is True
     assert SystemTelemetry(**GOOD_SYSTEM, ha_streaming=False).ha_streaming is False
     with pytest.raises(ValidationError):
