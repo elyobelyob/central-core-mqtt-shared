@@ -379,3 +379,12 @@ def test_home_assistant_last_message_is_optional_and_checked():
     for bad in ("yesterday", "2026-10-11T08:00:00", "3000-01-01T00:00:00Z"):
         with pytest.raises(ValidationError):
             SystemTelemetry(**GOOD_SYSTEM, ha_last_message_at=bad)
+
+
+def test_home_assistant_streaming_is_optional_and_boolean():
+    assert SystemTelemetry(**GOOD_SYSTEM).ha_streaming is None  # older hub
+    assert SystemTelemetry(**GOOD_SYSTEM, ha_streaming=None).ha_streaming is None
+    assert SystemTelemetry(**GOOD_SYSTEM, ha_streaming=True).ha_streaming is True
+    assert SystemTelemetry(**GOOD_SYSTEM, ha_streaming=False).ha_streaming is False
+    with pytest.raises(ValidationError):
+        SystemTelemetry(**GOOD_SYSTEM, ha_streaming="maybe")
