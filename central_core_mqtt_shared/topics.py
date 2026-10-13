@@ -89,6 +89,15 @@ CMD_SENSORS_SET = "hubs/{hub_id}/v{version}/cmd/sensors/set"
 """Set or override sensor configuration details."""
 
 
+# Login move (protocol 1.5). Vault -> hub; see central_core_mqtt_shared.login_change.
+
+CMD_LOGIN_KEY_REQUEST = "hubs/{hub_id}/v{version}/cmd/login/key_request"
+"""Ask the hub for a one-use public key to encrypt a new broker login to."""
+
+CMD_LOGIN_CHANGE = "hubs/{hub_id}/v{version}/cmd/login/change"
+"""Deliver a new broker username and password, encrypted to the hub's one-use key."""
+
+
 # ============================================================
 # Generic command template
 # ============================================================
@@ -124,6 +133,23 @@ Example:
 
     Hub replies on:
         hubs/<id>/v1/ack/config.update/abc123
+"""
+
+
+LOGIN_KEY = "hubs/{hub_id}/v{version}/ack/login.key_request/{command_id}"
+"""
+Hub answers `login/key_request` with its one-use public key (protocol 1.5).
+
+This is the command's ordinary ACK topic, so the broker rules that let a hub
+publish acknowledgements already cover it. `command_id` is the id of the
+`login/key_request` command.
+"""
+
+LOGIN_CHANGE_RESULT = "hubs/{hub_id}/v{version}/ack/login.change/{command_id}"
+"""
+Hub reports the outcome of `login/change` (protocol 1.5): ok, or a failure
+reason, plus the username in use. Never the password. `command_id` is the id
+of the `login/change` command. Published on whichever login the hub ends up on.
 """
 
 
@@ -410,10 +436,14 @@ __all__ = [
     "CMD_TUNNEL_STOP",
     "CMD_SENSORS_POLL",
     "CMD_SENSORS_SET",
+    "CMD_LOGIN_KEY_REQUEST",
+    "CMD_LOGIN_CHANGE",
     "CMD_GENERIC",
 
     # Ack
     "ACK_GENERIC",
+    "LOGIN_KEY",
+    "LOGIN_CHANGE_RESULT",
     "STORE_ACK",
 
     # Addon

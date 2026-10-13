@@ -5,6 +5,8 @@ from pydantic import AfterValidator, BaseModel, Field, field_validator
 from typing import Annotated, Optional, Dict, Any, Union, List
 from enum import Enum
 
+from . import login_change as _login_change
+
 
 # ============================================================
 # LIMITS
@@ -159,6 +161,34 @@ class CommandName(str, Enum):
     SENSORS_POLL = "sensors.poll"
     SENSORS_SET = "sensors.set"
     ADDON_HA = "addon.ha"
+    LOGIN_KEY_REQUEST = "login.key_request"
+    LOGIN_CHANGE = "login.change"
+
+
+class LoginChangeStatus(str, Enum):
+    OK = "ok"
+    FAILED = "failed"
+
+
+class LoginChangeReason(str, Enum):
+    """Why a login move did not happen (or `UNCHANGED` when it was a no-op ok).
+
+    In every failure but ROLLED_BACK the hub is still on its old login, and
+    nothing was saved. ROLLED_BACK means the new login was saved and used, the
+    main connection then failed, and the old login was restored.
+    """
+    UNCHANGED = "unchanged"  # ok: the hub already used this login
+    BAD_REQUEST = "bad_request"  # fields missing or malformed
+    UNKNOWN_REQUEST = "unknown_request"  # no live key for this request id
+    EXPIRED = "expired"  # the one-use key is older than KEY_TTL_SECONDS
+    USED = "used"  # the request id was already used
+    BAD_CIPHERTEXT = "bad_ciphertext"  # did not decrypt (also: wrong hub id or request id)
+    BAD_LOGIN = "bad_login"  # decrypted, but not a usable username and password
+    BUSY = "busy"  # another login change is in progress
+    CONNECT_FAILED = "connect_failed"  # the broker refused the new login
+    ACCESS_FAILED = "access_failed"  # connected, but cannot use the hub's own topics
+    SAVE_FAILED = "save_failed"  # could not save the login; old one kept
+    ROLLED_BACK = "rolled_back"  # switched, the main connection failed, old login restored
 
 
 # ============================================================
@@ -344,6 +374,18 @@ class SensorsSetCommand(CommandBase):
     settings: FreeDict = Field(default_factory=dict)
 
 
+class LoginKeyRequestCommand(CommandBase):
+    """Vault asks for a one-use key (protocol 1.5). No fields beyond the id."""
+
+
+class LoginChangeCommand(CommandBase):
+    """Vault delivers a login encrypted to the key sent for `request_id` (protocol 1.5)."""
+    request_id: str = Field(..., pattern=_login_change.REQUEST_ID_PATTERN)
+    ephemeral_public_key: str = Field(..., min_length=1, max_length=64)
+    nonce: str = Field(..., min_length=1, max_length=32)
+    ciphertext: str = Field(..., min_length=1, max_length=_login_change.MAX_CIPHERTEXT_BYTES * 2)
+
+
 # ============================================================
 # ADDON (Home Assistant) PAYLOADS
 # ============================================================
@@ -373,6 +415,31 @@ class CommandAck(BaseModel):
     status: AckStatus
     message: Optional[str] = Field(None, max_length=MAX_ACK_MESSAGE_LENGTH)
     timestamp: Timestamp
+
+
+class LoginKey(BaseModel):
+    """Hub's answer to `login/key_request` (protocol 1.5): a one-use public key."""
+    command_id: str = Field(..., min_length=1, max_length=MAX_COMMAND_ID_LENGTH)
+    request_id: str = Field(..., pattern=_login_change.REQUEST_ID_PATTERN)
+    algorithm: str = Field(_login_change.ALGORITHM, max_length=64)
+    public_key: str = Field(..., min_length=1, max_length=64)
+    fingerprint: Optional[str] = Field(None, max_length=64)
+    expires_at: Annotated[str, AfterValidator(lambda v: to_utc_iso(v))]
+    timestamp: Annotated[str, AfterValidator(lambda v: to_utc_iso(v))]
+
+
+class LoginChangeResult(BaseModel):
+    """Hub's report on `login/change` (protocol 1.5).
+
+    There is deliberately no password field. `username` is the login the hub
+    is on after the attempt (the new one on success, the old one otherwise).
+    """
+    command_id: str = Field(..., min_length=1, max_length=MAX_COMMAND_ID_LENGTH)
+    request_id: Optional[str] = Field(None, max_length=64)
+    status: LoginChangeStatus
+    reason: Optional[LoginChangeReason] = None
+    username: Optional[str] = Field(None, max_length=_login_change.MAX_USERNAME_LENGTH)
+    timestamp: Annotated[str, AfterValidator(lambda v: to_utc_iso(v))]
 
 
 # ============================================================
@@ -494,6 +561,7 @@ CommandPayload = Union[
     SensorsPollCommand,
     SensorsSetCommand,
     HAAddonCommand,
+    LoginChangeCommand,
 ]
 
 AckPayload = CommandAck
