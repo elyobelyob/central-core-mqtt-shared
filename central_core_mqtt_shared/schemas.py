@@ -5,8 +5,6 @@ from pydantic import AfterValidator, BaseModel, Field, field_validator
 from typing import Annotated, Optional, Dict, Any, Union, List
 from enum import Enum
 
-from . import login_change as _login_change
-
 
 # ============================================================
 # LIMITS
@@ -374,16 +372,25 @@ class SensorsSetCommand(CommandBase):
     settings: FreeDict = Field(default_factory=dict)
 
 
+# Login move (protocol 1.5). These repeat the constants in login_change.py on purpose:
+# this file must stay importable on its own, without the package around it (consumers load it
+# by path). tests/test_login_change.py checks they agree.
+_REQUEST_ID_PATTERN = r"[A-Za-z0-9_-]{16,64}"
+_LOGIN_ALGORITHM = "x25519-hkdf-sha256-aes256gcm"
+_MAX_LOGIN_USERNAME = 256
+_MAX_LOGIN_CIPHERTEXT_BYTES = 4096
+
+
 class LoginKeyRequestCommand(CommandBase):
     """Vault asks for a one-use key (protocol 1.5). No fields beyond the id."""
 
 
 class LoginChangeCommand(CommandBase):
     """Vault delivers a login encrypted to the key sent for `request_id` (protocol 1.5)."""
-    request_id: str = Field(..., pattern=_login_change.REQUEST_ID_PATTERN)
+    request_id: str = Field(..., pattern=_REQUEST_ID_PATTERN)
     ephemeral_public_key: str = Field(..., min_length=1, max_length=64)
     nonce: str = Field(..., min_length=1, max_length=32)
-    ciphertext: str = Field(..., min_length=1, max_length=_login_change.MAX_CIPHERTEXT_BYTES * 2)
+    ciphertext: str = Field(..., min_length=1, max_length=_MAX_LOGIN_CIPHERTEXT_BYTES * 2)
 
 
 # ============================================================
@@ -420,8 +427,8 @@ class CommandAck(BaseModel):
 class LoginKey(BaseModel):
     """Hub's answer to `login/key_request` (protocol 1.5): a one-use public key."""
     command_id: str = Field(..., min_length=1, max_length=MAX_COMMAND_ID_LENGTH)
-    request_id: str = Field(..., pattern=_login_change.REQUEST_ID_PATTERN)
-    algorithm: str = Field(_login_change.ALGORITHM, max_length=64)
+    request_id: str = Field(..., pattern=_REQUEST_ID_PATTERN)
+    algorithm: str = Field(_LOGIN_ALGORITHM, max_length=64)
     public_key: str = Field(..., min_length=1, max_length=64)
     fingerprint: Optional[str] = Field(None, max_length=64)
     expires_at: Annotated[str, AfterValidator(lambda v: to_utc_iso(v))]
@@ -438,7 +445,7 @@ class LoginChangeResult(BaseModel):
     request_id: Optional[str] = Field(None, max_length=64)
     status: LoginChangeStatus
     reason: Optional[LoginChangeReason] = None
-    username: Optional[str] = Field(None, max_length=_login_change.MAX_USERNAME_LENGTH)
+    username: Optional[str] = Field(None, max_length=_MAX_LOGIN_USERNAME)
     confirmation: Optional[str] = Field(None, max_length=64)
     """HMAC proving the hub made this result (`login_change.result_confirmation`).
     Absent when the hub could not decrypt the login. The vault acts on `ok`

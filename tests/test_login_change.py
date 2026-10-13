@@ -338,6 +338,25 @@ class TestHelpers:
 
 
 class TestTopicsAndSchemas:
+    def test_schema_constants_agree_with_the_module(self):
+        from central_core_mqtt_shared import schemas
+
+        assert schemas._REQUEST_ID_PATTERN == lc.REQUEST_ID_PATTERN
+        assert schemas._LOGIN_ALGORITHM == lc.ALGORITHM
+        assert schemas._MAX_LOGIN_USERNAME == lc.MAX_USERNAME_LENGTH
+        assert schemas._MAX_LOGIN_CIPHERTEXT_BYTES == lc.MAX_CIPHERTEXT_BYTES
+
+    def test_schemas_import_on_their_own(self):
+        import importlib.util
+        import pathlib
+
+        path = pathlib.Path(lc.__file__).with_name("schemas.py")
+        spec = importlib.util.spec_from_file_location("standalone_schemas", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        assert module.LoginChangeResult
+
+
     def test_topics(self):
         kw = dict(hub_id=HUB, version=1)
         assert build_topic(CMD_LOGIN_KEY_REQUEST, **kw) == f"hubs/{HUB}/v1/cmd/login/key_request"
