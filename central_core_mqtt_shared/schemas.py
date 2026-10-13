@@ -181,7 +181,8 @@ class LoginChangeReason(str, Enum):
     EXPIRED = "expired"  # the one-use key is older than KEY_TTL_SECONDS
     USED = "used"  # the request id was already used
     BAD_CIPHERTEXT = "bad_ciphertext"  # did not decrypt (also: wrong hub id or request id)
-    BAD_LOGIN = "bad_login"  # decrypted, but not a usable username and password
+    BAD_LOGIN = "bad_login"  # decrypted, but not a usable username and password, or not one of this hub's own logins
+    TLS_REQUIRED = "tls_required"  # the hub's MQTT connection is not encrypted: it will not send a password over it
     BUSY = "busy"  # another login change is in progress
     CONNECT_FAILED = "connect_failed"  # the broker refused the new login
     ACCESS_FAILED = "access_failed"  # connected, but cannot use the hub's own topics
