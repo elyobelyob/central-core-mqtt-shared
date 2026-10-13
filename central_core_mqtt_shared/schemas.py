@@ -439,6 +439,10 @@ class LoginChangeResult(BaseModel):
     status: LoginChangeStatus
     reason: Optional[LoginChangeReason] = None
     username: Optional[str] = Field(None, max_length=_login_change.MAX_USERNAME_LENGTH)
+    confirmation: Optional[str] = Field(None, max_length=64)
+    """HMAC proving the hub made this result (`login_change.result_confirmation`).
+    Absent when the hub could not decrypt the login. The vault acts on `ok`
+    only if it verifies."""
     timestamp: Annotated[str, AfterValidator(lambda v: to_utc_iso(v))]
 
 

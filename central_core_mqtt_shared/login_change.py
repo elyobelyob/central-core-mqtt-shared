@@ -10,7 +10,14 @@ ever crossing the broker in clear text. The flow (see docs/LOGIN_CHANGE.md):
    one-use public key, a nonce and the ciphertext.
 3. The hub decrypts (`decrypt_login_change`), tests the login on a second
    connection, saves it only if the test passes, and reports
-   ``login_change_result`` (never the password).
+   ``login_change_result`` (never the password). The report carries a
+   ``confirmation``: an HMAC under a key that only the vault's and the hub's
+   one-use keys can derive, so the vault can tell the hub's "ok" from a forgery
+   (`result_confirmation`, `verify_result_confirmation`).
+
+Neither side can prove who made the *public* keys (see docs/LOGIN_CHANGE.md,
+"Trust"): the vault must show `key_fingerprint(public_key)` to the owner and
+get it confirmed against the hub's own log before it encrypts anything.
 
 Crypto: X25519 key agreement, HKDF-SHA256, AES-256-GCM. The hub id and the
 request id are the GCM associated data, so a message made for another hub or
@@ -23,7 +30,9 @@ from __future__ import annotations
 
 import base64
 import binascii
+import dataclasses
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -63,11 +72,16 @@ NONCE_BYTES = 12  # AES-GCM nonce
 TAG_BYTES = 16  # AES-GCM tag
 
 MAX_USERNAME_LENGTH = 256
-MAX_PASSWORD_LENGTH = 1024
-MAX_CIPHERTEXT_BYTES = 4096
+MAX_PASSWORD_LENGTH = 512
+MAX_CIPHERTEXT_BYTES = 4096  # the longest login (256 + 512 four-byte characters) is about 2.4 KB
 
 REQUEST_ID_PATTERN = r"[A-Za-z0-9_-]{16,64}"
 _REQUEST_ID_RE = re.compile(REQUEST_ID_PATTERN)
+
+USERNAME_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._@:-]{0,255}"
+"""A broker username: letters, digits and . _ @ : - only (no spaces or control
+characters, so it can never forge a log line)."""
+_USERNAME_RE = re.compile(USERNAME_PATTERN)
 
 
 class LoginChangeCryptoError(ValueError):
@@ -81,6 +95,19 @@ class LoginChangeCryptoError(ValueError):
 # ------------------------------------------------------------
 # Small helpers
 # ------------------------------------------------------------
+
+def is_valid_username(username: object) -> bool:
+    return isinstance(username, str) and _USERNAME_RE.fullmatch(username) is not None
+
+
+def is_valid_password(password: object) -> bool:
+    """1 to MAX_PASSWORD_LENGTH printable characters (no control characters or NUL)."""
+    return (
+        isinstance(password, str)
+        and 1 <= len(password) <= MAX_PASSWORD_LENGTH
+        and password.isprintable()
+    )
+
 
 def is_valid_request_id(request_id: object) -> bool:
     return isinstance(request_id, str) and _REQUEST_ID_RE.fullmatch(request_id) is not None
@@ -97,7 +124,7 @@ def _b64(data: bytes) -> str:
 
 def _unb64(value: object, name: str, length: Optional[int] = None, max_length: Optional[int] = None) -> bytes:
     if not isinstance(value, str) or len(value) > 8192:
-        raise LoginChangeCryptoError(f"{name} is not valid base64")
+        raise LoginChangeCryptoError(f"{name} is not valid base64 or is too long")
     try:
         raw = base64.b64decode(value, validate=True)
     except (binascii.Error, ValueError):
@@ -132,13 +159,48 @@ def _load_public(value: object, name: str) -> X25519PublicKey:
     return X25519PublicKey.from_public_bytes(_unb64(value, name, length=KEY_BYTES))
 
 
-def _derive_key(shared: bytes, ephemeral_pub: bytes, hub_pub: bytes, aad: bytes) -> bytes:
-    return HKDF(
+def _derive_keys(shared: bytes, ephemeral_pub: bytes, hub_pub: bytes, aad: bytes) -> Tuple[bytes, bytes]:
+    """One HKDF run, 64 bytes: the first 32 are the AES-256-GCM key, the last 32
+    the key for the result confirmation."""
+    okm = HKDF(
         algorithm=hashes.SHA256(),
-        length=32,
+        length=64,
         salt=ephemeral_pub + hub_pub,
         info=LABEL + b"\x00" + aad,
     ).derive(shared)
+    return okm[:32], okm[32:]
+
+
+def _confirmation_input(aad: bytes, status: str, reason: Optional[str], username: Optional[str]) -> bytes:
+    parts = [b"result", aad, status.encode(), (reason or "").encode(), (username or "").encode()]
+    return LABEL + b"\x00" + b"\x00".join(parts)
+
+
+def result_confirmation(
+    confirm_key: bytes, hub_id: str, request_id: str, status: str, reason: Optional[str], username: Optional[str]
+) -> str:
+    """The `confirmation` field of a `login_change_result`: base64 HMAC-SHA256
+    over the label, hub id, request id, status, reason and username."""
+    aad = associated_data(hub_id, request_id)
+    mac = hmac.new(confirm_key, _confirmation_input(aad, status, reason, username), "sha256").digest()
+    return _b64(mac)
+
+
+def verify_result_confirmation(
+    confirm_key: bytes,
+    hub_id: str,
+    request_id: str,
+    status: str,
+    reason: Optional[str],
+    username: Optional[str],
+    confirmation: object,
+) -> bool:
+    """True only if `confirmation` is the right HMAC for these exact values.
+    The vault acts on an "ok" (for example by removing the old login) only when this is True."""
+    if not isinstance(confirmation, str):
+        return False
+    expected = result_confirmation(confirm_key, hub_id, request_id, status, reason, username)
+    return hmac.compare_digest(expected.encode("ascii"), confirmation.encode("utf-8", "replace"))
 
 
 def public_key_b64(private_key: X25519PrivateKey) -> str:
@@ -175,17 +237,20 @@ def encrypt_login_change(
     *,
     ephemeral_private_key: Optional[X25519PrivateKey] = None,
     nonce: Optional[bytes] = None,
-) -> dict:
+) -> Tuple[dict, bytes]:
     """Encrypt a login for one hub and one request.
 
-    Returns the three message fields: ``ephemeral_public_key``, ``nonce`` and
-    ``ciphertext`` (all base64). ``ephemeral_private_key`` and ``nonce`` are
-    for test vectors only; leave them out in real use.
+    Returns ``(fields, confirm_key)``. ``fields`` holds the three message
+    fields ``ephemeral_public_key``, ``nonce`` and ``ciphertext`` (all base64).
+    ``confirm_key`` is 32 secret bytes: keep it in memory until the hub's
+    result arrives and check it with `verify_result_confirmation`.
+    ``ephemeral_private_key`` and ``nonce`` are for test vectors only; leave
+    them out in real use.
     """
-    if not isinstance(username, str) or not 1 <= len(username) <= MAX_USERNAME_LENGTH:
-        raise LoginChangeCryptoError("username must be 1 to %d characters" % MAX_USERNAME_LENGTH)
-    if not isinstance(password, str) or not 1 <= len(password) <= MAX_PASSWORD_LENGTH:
-        raise LoginChangeCryptoError("password must be 1 to %d characters" % MAX_PASSWORD_LENGTH)
+    if not is_valid_username(username):
+        raise LoginChangeCryptoError("username is not valid")
+    if not is_valid_password(password):
+        raise LoginChangeCryptoError("password must be 1 to %d printable characters" % MAX_PASSWORD_LENGTH)
     aad = associated_data(hub_id, request_id)
     hub_pub = _load_public(hub_public_key, "hub public key")
     ephemeral = ephemeral_private_key or X25519PrivateKey.generate()
@@ -197,19 +262,32 @@ def encrypt_login_change(
     except ValueError:
         raise LoginChangeCryptoError("hub public key is not usable") from None
     ephemeral_pub = _public_bytes(ephemeral.public_key())
-    key = _derive_key(shared, ephemeral_pub, _public_bytes(hub_pub), aad)
-    plaintext = json.dumps({"username": username, "password": password}, separators=(",", ":")).encode("utf-8")
+    key, confirm_key = _derive_keys(shared, ephemeral_pub, _public_bytes(hub_pub), aad)
+    plaintext = json.dumps(
+        {"username": username, "password": password}, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
     ciphertext = AESGCM(key).encrypt(nonce, plaintext, aad)
-    return {
+    fields = {
         "ephemeral_public_key": _b64(ephemeral_pub),
         "nonce": _b64(nonce),
         "ciphertext": _b64(ciphertext),
     }
+    return fields, confirm_key
 
 
 # ------------------------------------------------------------
 # Hub side
 # ------------------------------------------------------------
+
+@dataclasses.dataclass(frozen=True)
+class DecryptedLogin:
+    """What the hub gets from `decrypt_login_change`. The secrets are left out
+    of ``repr`` so a log line or traceback that shows the object does not show them."""
+
+    username: str
+    password: str = dataclasses.field(repr=False)
+    confirm_key: bytes = dataclasses.field(repr=False)
+
 
 def decrypt_login_change(
     hub_private_key: X25519PrivateKey,
@@ -218,8 +296,8 @@ def decrypt_login_change(
     ephemeral_public_key: str,
     nonce: str,
     ciphertext: str,
-) -> Tuple[str, str]:
-    """Decrypt a login change; returns ``(username, password)``.
+) -> DecryptedLogin:
+    """Decrypt a login change; returns a `DecryptedLogin`.
 
     Raises `LoginChangeCryptoError` for anything wrong: malformed fields, a
     different hub id or request id than the one it was made for, a changed
@@ -236,7 +314,7 @@ def decrypt_login_change(
     except ValueError:
         raise LoginChangeCryptoError("could not decrypt") from None
     hub_pub = _public_bytes(hub_private_key.public_key())
-    key = _derive_key(shared, ephemeral_pub, hub_pub, aad)
+    key, confirm_key = _derive_keys(shared, ephemeral_pub, hub_pub, aad)
     try:
         plaintext = AESGCM(key).decrypt(nonce_raw, data, aad)
     except InvalidTag:
@@ -249,13 +327,11 @@ def decrypt_login_change(
         raise LoginChangeCryptoError("decrypted message is not a login") from None
     if (
         keys != {"username", "password"}
-        or not isinstance(username, str)
-        or not isinstance(password, str)
-        or not 1 <= len(username) <= MAX_USERNAME_LENGTH
-        or not 1 <= len(password) <= MAX_PASSWORD_LENGTH
+        or not is_valid_username(username)
+        or not is_valid_password(password)
     ):
         raise LoginChangeCryptoError("decrypted message is not a login")
-    return username, password
+    return DecryptedLogin(username, password, confirm_key)
 
 
 __all__ = [
@@ -264,7 +340,13 @@ __all__ = [
     "LOGIN_TEST_TIMEOUT_SECONDS",
     "ROLLBACK_WINDOW_SECONDS",
     "REQUEST_ID_PATTERN",
+    "DecryptedLogin",
     "LoginChangeCryptoError",
+    "USERNAME_PATTERN",
+    "is_valid_password",
+    "is_valid_username",
+    "result_confirmation",
+    "verify_result_confirmation",
     "associated_data",
     "decrypt_login_change",
     "encrypt_login_change",

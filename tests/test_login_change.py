@@ -60,36 +60,40 @@ def _reference_encrypt(hub_secret, vault_secret, nonce, hub_id, request_id, user
     shared = eph.exchange(_priv(hub_secret).public_key())
     label = b"central-core/login-change/v1"
     aad = label + b"\x00" + hub_id.encode() + b"\x00" + request_id.encode()
-    key = HKDF(hashes.SHA256(), 32, salt=eph_pub + hub_pub, info=label + b"\x00" + aad).derive(shared)
-    pt = json.dumps({"username": user, "password": pw}, separators=(",", ":")).encode()
-    return base64.b64encode(AESGCM(key).encrypt(nonce, pt, aad)).decode()
+    okm = HKDF(hashes.SHA256(), 64, salt=eph_pub + hub_pub, info=label + b"\x00" + aad).derive(shared)
+    pt = json.dumps({"username": user, "password": pw}, separators=(",", ":"), ensure_ascii=False).encode()
+    return base64.b64encode(AESGCM(okm[:32]).encrypt(nonce, pt, aad)).decode(), okm[32:]
 
 
 def _make(hub_key=None, hub_id=HUB, request_id=REQ):
     hub_key = hub_key or lc.generate_hub_private_key()
-    msg = lc.encrypt_login_change(lc.public_key_b64(hub_key), hub_id, request_id, USER, PW)
+    msg, _ = lc.encrypt_login_change(lc.public_key_b64(hub_key), hub_id, request_id, USER, PW)
     return hub_key, msg
 
 
 class TestVector:
     def test_matches_independent_reference(self):
-        out = lc.encrypt_login_change(
+        out, confirm_key = lc.encrypt_login_change(
             lc.public_key_b64(_priv(HUB_SECRET)), HUB, REQ, USER, PW,
             ephemeral_private_key=_priv(VAULT_SECRET), nonce=NONCE,
         )
+        ref_ct, ref_confirm = _reference_encrypt(HUB_SECRET, VAULT_SECRET, NONCE, HUB, REQ, USER, PW)
+        assert confirm_key == ref_confirm
+        assert confirm_key.hex() == VECTOR_CONFIRM_KEY
         assert out["nonce"] == VECTOR["nonce"]
         assert out["ephemeral_public_key"] == VECTOR["ephemeral_public_key"]
         assert lc.public_key_b64(_priv(HUB_SECRET)) == VECTOR["hub_public_key"]
-        assert out["ciphertext"] == _reference_encrypt(HUB_SECRET, VAULT_SECRET, NONCE, HUB, REQ, USER, PW)
+        assert out["ciphertext"] == ref_ct
         assert out["ciphertext"] == VECTOR_CIPHERTEXT
 
     def test_vector_decrypts(self):
         got = lc.decrypt_login_change(
             _priv(HUB_SECRET), HUB, REQ, VECTOR["ephemeral_public_key"], VECTOR["nonce"], VECTOR_CIPHERTEXT
         )
-        assert got == (USER, PW)
+        assert (got.username, got.password) == (USER, PW)
 
 
+VECTOR_CONFIRM_KEY = "7eb6ffba290c4310862c768ee273b1b1793cf5b38724e19a206955f8cc526364"
 VECTOR_CIPHERTEXT = (
     "igTVMhyG0u4cJq530O5DCG12S5mti/xZeLaqdUnelyrr46LdNX9JCErxtfhc8oi9"
     "LT4oMk/6Tkno1ybXRbxGj0PD8Dl+8Ivm19GU6nb0jJAN+anXgI6jC8fv"
@@ -99,20 +103,34 @@ VECTOR_CIPHERTEXT = (
 class TestRoundTrip:
     def test_round_trip(self):
         key, msg = _make()
-        assert lc.decrypt_login_change(key, HUB, REQ, **msg) == (USER, PW)
+        got = lc.decrypt_login_change(key, HUB, REQ, **msg)
+        assert (got.username, got.password) == (USER, PW)
 
     def test_fresh_nonce_and_ephemeral_key_each_time(self):
         key = lc.generate_hub_private_key()
-        a = lc.encrypt_login_change(lc.public_key_b64(key), HUB, REQ, USER, PW)
-        b = lc.encrypt_login_change(lc.public_key_b64(key), HUB, REQ, USER, PW)
+        a, ka = lc.encrypt_login_change(lc.public_key_b64(key), HUB, REQ, USER, PW)
+        b, kb = lc.encrypt_login_change(lc.public_key_b64(key), HUB, REQ, USER, PW)
+        assert ka != kb
         assert a["nonce"] != b["nonce"]
         assert a["ephemeral_public_key"] != b["ephemeral_public_key"]
         assert a["ciphertext"] != b["ciphertext"]
 
     def test_non_ascii_password(self):
         key = lc.generate_hub_private_key()
-        msg = lc.encrypt_login_change(lc.public_key_b64(key), HUB, REQ, "hüb", "päss☃")
-        assert lc.decrypt_login_change(key, HUB, REQ, **msg) == ("hüb", "päss☃")
+        msg, _ = lc.encrypt_login_change(lc.public_key_b64(key), HUB, REQ, USER, "p\u00e4ss\u2603")
+        assert lc.decrypt_login_change(key, HUB, REQ, **msg).password == "p\u00e4ss\u2603"
+
+    def test_longest_password_of_four_byte_characters_fits(self):
+        key = lc.generate_hub_private_key()
+        pw = "\U0001F600" * lc.MAX_PASSWORD_LENGTH
+        msg, _ = lc.encrypt_login_change(lc.public_key_b64(key), HUB, REQ, "u" * lc.MAX_USERNAME_LENGTH, pw)
+        assert lc.decrypt_login_change(key, HUB, REQ, **msg).password == pw
+        LoginChangeCommand(command_id="c", request_id=REQ, **msg)
+
+    def test_repr_hides_secrets(self):
+        key, msg = _make()
+        got = lc.decrypt_login_change(key, HUB, REQ, **msg)
+        assert PW not in repr(got) and USER in repr(got) and "confirm_key" not in repr(got)
 
     def test_plaintext_is_not_in_the_message(self):
         _, msg = _make()
@@ -194,6 +212,10 @@ class TestRefusals:
             b'{"username":"","password":"b"}',
             b'{"username":"a","password":""}',
             b'{"username":"%s","password":"b"}' % (b"u" * 257),
+            b'{"username":"evil\\nINFO fake","password":"b"}',
+            b'{"username":"a b","password":"b"}',
+            b'{"username":"a","password":"bad\\npass"}',
+            b'{"username":"a","password":"nul\\u0000"}',
         ],
     )
     def test_authentic_but_not_a_login(self, plaintext):
@@ -224,12 +246,12 @@ class TestRefusals:
 class TestEncryptChecks:
     def test_bad_inputs(self):
         pub = lc.public_key_b64(lc.generate_hub_private_key())
-        with pytest.raises(lc.LoginChangeCryptoError, match="username"):
-            lc.encrypt_login_change(pub, HUB, REQ, "", PW)
-        with pytest.raises(lc.LoginChangeCryptoError, match="password"):
-            lc.encrypt_login_change(pub, HUB, REQ, USER, "")
-        with pytest.raises(lc.LoginChangeCryptoError, match="password"):
-            lc.encrypt_login_change(pub, HUB, REQ, USER, "p" * 1025)
+        for bad_user in ("", "evil\nline", "has space", "-leading", "u" * 257, None):
+            with pytest.raises(lc.LoginChangeCryptoError, match="username"):
+                lc.encrypt_login_change(pub, HUB, REQ, bad_user, PW)
+        for bad_pw in ("", "p" * 513, "new\nline", "nul\x00", None):
+            with pytest.raises(lc.LoginChangeCryptoError, match="password"):
+                lc.encrypt_login_change(pub, HUB, REQ, USER, bad_pw)
         with pytest.raises(lc.LoginChangeCryptoError, match="public key"):
             lc.encrypt_login_change("bogus", HUB, REQ, USER, PW)
         with pytest.raises(lc.LoginChangeCryptoError, match="nonce"):
@@ -239,6 +261,62 @@ class TestEncryptChecks:
         zero = base64.b64encode(bytes(32)).decode()
         with pytest.raises(lc.LoginChangeCryptoError, match="not usable"):
             lc.encrypt_login_change(zero, HUB, REQ, USER, PW)
+
+
+class TestConfirmation:
+    def _pair(self):
+        key = lc.generate_hub_private_key()
+        msg, vault_key = lc.encrypt_login_change(lc.public_key_b64(key), HUB, REQ, USER, PW)
+        hub_key = lc.decrypt_login_change(key, HUB, REQ, **msg).confirm_key
+        return vault_key, hub_key
+
+    def test_both_sides_derive_the_same_key(self):
+        vault_key, hub_key = self._pair()
+        assert vault_key == hub_key and len(vault_key) == 32
+
+    def test_verifies_exactly_what_was_signed(self):
+        vault_key, hub_key = self._pair()
+        c = lc.result_confirmation(hub_key, HUB, REQ, "ok", None, USER)
+        assert lc.verify_result_confirmation(vault_key, HUB, REQ, "ok", None, USER, c)
+        assert lc.verify_result_confirmation(
+            vault_key, HUB, REQ, "failed", "rolled_back", USER,
+            lc.result_confirmation(hub_key, HUB, REQ, "failed", "rolled_back", USER),
+        )
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            (HUB, REQ, "failed", None, USER),
+            (HUB, REQ, "ok", "unchanged", USER),
+            (HUB, REQ, "ok", None, "hub-other"),
+            (HUB, REQ, "ok", None, None),
+            ("demo-home-002", REQ, "ok", None, USER),
+            (HUB, "req_other_0123456789", "ok", None, USER),
+        ],
+    )
+    def test_any_changed_value_fails(self, args):
+        vault_key, hub_key = self._pair()
+        c = lc.result_confirmation(hub_key, HUB, REQ, "ok", None, USER)
+        assert not lc.verify_result_confirmation(vault_key, *args, c)
+
+    def test_forgeries_fail(self):
+        vault_key, _ = self._pair()
+        forged = lc.result_confirmation(bytes(32), HUB, REQ, "ok", None, USER)
+        assert not lc.verify_result_confirmation(vault_key, HUB, REQ, "ok", None, USER, forged)
+        for junk in (None, "", 5, "\u00e9\u00e9"):
+            assert not lc.verify_result_confirmation(vault_key, HUB, REQ, "ok", None, USER, junk)
+
+
+class TestX25519Anchor:
+    def test_rfc7748_section_6_1(self):
+        # Test vector from RFC 7748, section 6.1: anchors the primitive the helpers rely on.
+        alice = X25519PrivateKey.from_private_bytes(
+            bytes.fromhex("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a")
+        )
+        bob_pub = X25519PrivateKey.from_private_bytes(
+            bytes.fromhex("5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb")
+        ).public_key()
+        assert alice.exchange(bob_pub).hex() == "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742"
 
 
 class TestHelpers:
@@ -288,6 +366,8 @@ class TestTopicsAndSchemas:
         assert LoginChangeCommand(command_id="c", request_id=REQ, **msg).request_id == REQ
         with pytest.raises(ValidationError):
             LoginChangeCommand(command_id="c", request_id="bad id", **msg)
+        with pytest.raises(ValidationError):
+            LoginChangeCommand(command_id="c", request_id=REQ, **{**msg, "ciphertext": "A" * 8193})
         with pytest.raises(ValidationError):
             LoginChangeCommand(command_id="c", request_id=REQ)
 
