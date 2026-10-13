@@ -269,7 +269,7 @@ class SystemTelemetry(OutboxFields):
 
     @field_validator("ha_last_event_at", "ha_last_message_at", mode="before")
     @classmethod
-    def _ha_last_event_utc(cls, value: Any) -> Optional[str]:
+    def _ha_times_utc(cls, value: Any) -> Optional[str]:
         return _optional_utc_iso(value)
 
 
