@@ -34,16 +34,27 @@ The hub's ordinary acknowledgement topic also carries the hub's generic replies,
 
 ## Result reasons (`LoginChangeReason`)
 
-Failure reasons: `bad_request`, `unknown_request`, `expired`, `used`, `bad_ciphertext`, `bad_login`, `busy`, `connect_failed`, `access_failed`, `save_failed`, `rolled_back`. `ok` may carry `unchanged` (the hub already used that login). In every failure except `rolled_back` nothing was saved and the hub is still on its old login; `rolled_back` means the new login was tried and the old one restored.
+Failure reasons: `bad_request`, `unknown_request`, `expired`, `used`, `bad_ciphertext`, `bad_login`, `tls_required`, `busy`, `connect_failed`, `access_failed`, `save_failed`, `rolled_back`. `ok` may carry `unchanged` (the hub already used that login). In every failure except `rolled_back` nothing was saved and the hub is still on its old login; `rolled_back` means the new login was tried and the old one restored.
+
+## Rules for the vault
+
+The hub cannot tell the vault from anyone else who can publish on its topics, and the vault cannot tell the hub's messages from forgeries, so each side keeps a few rules.
+
+Before it encrypts anything:
+
+1. Work out `key_fingerprint(public_key)` itself (not use the received `fingerprint` field).
+2. Show it to the owner and get it confirmed against the fingerprint the hub writes to its own log.
+3. Give up if two different keys arrive for the same `command_id`; check `algorithm` equals `ALGORITHM` and the key has not expired by the vault's own clock.
+4. Use only a username the hub accepts: `hub-<hub id>`, `hub-<hub id>-a` or `hub-<hub id>-b`. The hub refuses anything else with `bad_login`, so a forged message cannot move it back to the shared login.
+
+After sending:
+
+5. Wait for the result for as long as the hub's budget: up to about 30 s for the login test, 120 s for the main connection, then up to two more 120 s windows if it has to go back, so give it 10 minutes.
+6. Act on `ok` (for example by retiring the old login) only if `verify_result_confirmation` accepts it AND `username` is the username the vault sent. A result without a valid `confirmation` is advice only: never delete or change a login because of a failure, a timeout or a missing result, because the hub may already be using the new login.
+7. Before retiring the old login, send the hub a command (for example another `login/key_request`) and see it answered on the new login. The hub's login test proves it can connect, subscribe and publish, but a broker can grant a subscription without delivering to it.
+
+The hub refuses a move (`tls_required`) when its MQTT connection is not encrypted, because the login would cross the network in the clear.
 
 ## Trust
 
-Messages carry no signature, so the vault cannot tell that a `login_key` really came from the hub: whoever can publish on the hub's topics can answer first, and the password would be encrypted to them. The vault must therefore, before it encrypts anything:
-
-1. work out `key_fingerprint(public_key)` itself (not use the received `fingerprint` field);
-2. show it to the owner and get it confirmed against the fingerprint the hub writes to its own log;
-3. give up if two different keys arrive for the same `command_id`, and check `algorithm` equals `ALGORITHM` and the key has not expired by its own clock.
-
-After sending, the vault treats an `ok` result as real, and removes any old login, only if `verify_result_confirmation` accepts it. A forged `ok` has no valid `confirmation`.
-
-A long-term hub identity key, pinned in the vault, would remove the manual step. It is not in this version.
+Messages carry no signature. Whoever can publish on the hub's topics can answer a key request first and receive the password (rule 1 to 3 are the defence), can send the hub a well-formed `login_change` (limited by rule 4 and by the hub only using up its key once a login has passed the test), and can publish a failure that looks like the hub's (rule 6). A long-term identity key for the hub, and a signing key for the vault pinned in the hub, would remove these manual steps. They are not in this version.

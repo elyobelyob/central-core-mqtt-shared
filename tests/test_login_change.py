@@ -399,5 +399,6 @@ class TestTopicsAndSchemas:
             timestamp="2026-10-13T10:00:00Z",
         )
         assert failed.reason is LoginChangeReason.ROLLED_BACK
+        assert LoginChangeReason("tls_required") is LoginChangeReason.TLS_REQUIRED
         with pytest.raises(ValidationError):
             LoginChangeResult(command_id="c", status="maybe", timestamp="2026-10-13T10:00:00Z")
