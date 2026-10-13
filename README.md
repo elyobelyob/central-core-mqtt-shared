@@ -83,9 +83,16 @@ but a consumer moving its pin from v1.1.0 must:
 - expect `ValueError` from `build_topic` / `build_subscription`, and
   `ValidationError` for values outside the bounds below.
 
+### Home Assistant liveness (v1.2.0, v1.3.0)
+
 `SystemTelemetry` also gains two optional fields, `ha_connected` and
 `ha_last_event_at` (None from older hubs): whether Home Assistant is feeding
 the hub, and when it last sent an event.
+
+v1.3.0 adds a third, `ha_last_message_at` (UTC ISO 8601, None from older hubs):
+when anything last came back over the Home Assistant websocket, a ping reply
+included. `ha_last_event_at` only moves when a watched sensor changes; this one
+keeps moving in a quiet house, so "connected but quiet" differs from "feed dead".
 
 ### What is bounded (v1.2.0)
 

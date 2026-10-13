@@ -259,10 +259,17 @@ class SystemTelemetry(OutboxFields):
     # heartbeats, but no door or motion changes reach the vault.
     ha_connected: Optional[bool] = Field(None, description="Home Assistant websocket connected")
     ha_last_event_at: Optional[str] = Field(None, description="Last event from Home Assistant, UTC ISO 8601")
+    # Since v1.3.0, optional (None from older hubs): the last time ANY message
+    # (a ping reply, a result or an event) came back over the Home Assistant
+    # websocket. Unlike ha_last_event_at it keeps moving in a quiet house, so
+    # "connected but quiet" can be told from "feed dead".
+    ha_last_message_at: Optional[str] = Field(
+        None, description="Last message of any kind from Home Assistant, UTC ISO 8601"
+    )
 
-    @field_validator("ha_last_event_at", mode="before")
+    @field_validator("ha_last_event_at", "ha_last_message_at", mode="before")
     @classmethod
-    def _ha_last_event_utc(cls, value: Any) -> Optional[str]:
+    def _ha_times_utc(cls, value: Any) -> Optional[str]:
         return _optional_utc_iso(value)
 
 

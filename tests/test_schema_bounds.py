@@ -369,3 +369,13 @@ def test_oversized_attributes_or_unit_fall_back_to_a_basic_sensor():
     assert [type(s).__name__ for s in t.sensors] == ["BasicSensor", "BasicSensor", "FullSensor"]
     with pytest.raises(ValidationError):
         SensorsTelemetry(partial=False, timestamp=1.0, sensors=[{"id": "sensor.d", "state": "x" * (MAX_STATE_BYTES + 1)}])
+
+
+def test_home_assistant_last_message_is_optional_and_checked():
+    old = SystemTelemetry(**GOOD_SYSTEM, ha_connected=True)  # from a v1.2.0 hub
+    assert old.ha_last_message_at is None
+    new = SystemTelemetry(**GOOD_SYSTEM, ha_connected=True, ha_last_message_at="2026-10-11T08:00:00+01:00")
+    assert new.ha_last_message_at == "2026-10-11T07:00:00Z"
+    for bad in ("yesterday", "2026-10-11T08:00:00", "3000-01-01T00:00:00Z"):
+        with pytest.raises(ValidationError):
+            SystemTelemetry(**GOOD_SYSTEM, ha_last_message_at=bad)
